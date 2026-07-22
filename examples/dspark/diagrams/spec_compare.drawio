@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="30.4.1">
+  <diagram name="三算法对比">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" page="1" pageWidth="1240" pageHeight="620">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="投机解码三算法对比:MTP(NEXTN) vs DFlash vs DSpark" style="text;html=1;fontSize=16;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="320" y="10" width="600" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="laneA" value="MTP / NEXTN(EAGLE worker 驱动)" style="swimlane;startSize=32;fillColor=#f8f8f8;strokeColor=#666666;fontSize=13;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="20" y="50" width="390" height="550" as="geometry" />
+        </mxCell>
+        <mxCell id="a_t" value="目标模型&#xa;(MTP 头与其同 checkpoint 训练)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="95" y="50" width="200" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="a_d" value="Draft = MTP 头&#xa;(目标 checkpoint 自带,1 层)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneA">
+          <mxGeometry x="95" y="200" width="200" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="a_kv" value="Draft KV(全长)&#xa;draft 自己前向算出的 K/V" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;" vertex="1" parent="laneA">
+          <mxGeometry x="105" y="330" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a_note" value="draft:γ 次自回归小步(串行)&#xa;verify:定长 bs×(γ+1)&#xa;接受同步:draft_extend 重算前向写 KV" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="laneA">
+          <mxGeometry x="35" y="440" width="320" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="a_e1" value="顶层 hidden 作 draft 输入&#xa;(逐步递归喂)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.25;exitY=1;entryX=0.25;entryY=0;" edge="1" parent="laneA" source="a_t" target="a_d">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a_e2" value="γ 候选 → 定长验证" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.75;exitY=0;entryX=0.75;entryY=1;" edge="1" parent="laneA" source="a_d" target="a_t">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a_e3" value="draft 前向写入" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="laneA" source="a_d" target="a_kv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="laneB" value="DFlash" style="swimlane;startSize=32;fillColor=#f8f8f8;strokeColor=#666666;fontSize=13;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="425" y="50" width="390" height="550" as="geometry" />
+        </mxCell>
+        <mxCell id="b_t" value="目标模型&#xa;(dflash_layers_to_capture 捕获)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="95" y="50" width="200" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="b_d" value="Draft = 独立块式小模型&#xa;(锚点 + [MASK] 填空)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneB">
+          <mxGeometry x="95" y="200" width="200" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="b_kv" value="Draft KV(可 compact 滑窗)&#xa;存 K/V(由目标 hidden 投影而来)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;" vertex="1" parent="laneB">
+          <mxGeometry x="105" y="330" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="b_note" value="draft:一次块式前向(γ 个 MASK 并行)&#xa;verify:定长块 bs×block_size&#xa;接受同步:hidden 注入 KV,无 draft_extend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="laneB">
+          <mxGeometry x="35" y="440" width="320" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="b_e1" value="多个中间层 hidden&#xa;投影注入 draft KV" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="laneB" source="b_t" target="b_kv">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="45" y="77" />
+              <mxPoint x="45" y="365" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b_e2" value="块候选 → 定长块验证" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.75;exitY=0;entryX=0.75;entryY=1;" edge="1" parent="laneB" source="b_d" target="b_t">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="b_e3" value="读上下文" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="laneB" source="b_d" target="b_kv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="laneC" value="DSpark(DFlash 家族,复用其跨步状态)" style="swimlane;startSize=32;fillColor=#f8f8f8;strokeColor=#666666;fontSize=13;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="830" y="50" width="390" height="550" as="geometry" />
+        </mxCell>
+        <mxCell id="c_t" value="目标模型&#xa;(dspark_layers_to_capture 捕获)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="laneC">
+          <mxGeometry x="95" y="50" width="200" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="c_d" value="Draft = 块式小模型 + Markov 头&#xa;+ 置信度头(或 dsv4 自草稿)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="laneC">
+          <mxGeometry x="95" y="200" width="200" height="54" as="geometry" />
+        </mxCell>
+        <mxCell id="c_p" value="Planner:置信度+SPS 表&#xa;→ 每请求 verify_lens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="laneC">
+          <mxGeometry x="238" y="106" width="145" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="c_kv" value="Draft KV(SWA 滑窗池)&#xa;存 K/V(由目标 hidden 投影而来)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;" vertex="1" parent="laneC">
+          <mxGeometry x="105" y="330" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="c_note" value="draft:一次块式前向 + Markov 块内修正&#xa;verify:弹性 ragged/compact(按预算裁剪)&#xa;接受同步:inject_ragged(commit_lens 掩蔽)&#xa;+ accept/commit 折入 verify cuda graph 尾部" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=left;spacingLeft=8;" vertex="1" parent="laneC">
+          <mxGeometry x="35" y="440" width="320" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="c_e1" value="多个中间层 hidden&#xa;投影注入 draft KV" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="laneC" source="c_t" target="c_kv">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="45" y="77" />
+              <mxPoint x="45" y="365" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c_e2" value="压紧候选 → 弹性验证" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.55;exitY=0;entryX=0.55;entryY=1;verticalAlign=bottom;" edge="1" parent="laneC" source="c_d" target="c_t">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c_e3" value="读上下文" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="laneC" source="c_d" target="c_kv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c_e4" value="confidence" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;fontSize=10;labelBackgroundColor=#ffffff;exitX=1;exitY=0.25;entryX=0.5;entryY=1;" edge="1" parent="laneC" source="c_d" target="c_p">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
