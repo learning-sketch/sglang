@@ -118,7 +118,7 @@ sequenceDiagram
         D->>DW: 顺序校验(accept_chunk) → read_view → inject_pd_hidden_chunk
         DW-->>D: CUDA event(注入完成的异步凭据)
         D->>W: PD_HIDDEN_CHUNK_ACK(event.sync 后)
-        W->>W: 唤醒 park 的下一 chunk;释放源窗口行
+        W->>W: 唤醒 park 的下一 chunk、释放源窗口行
     end
     W->>W: last chunk ACK 齐 → mark_pd_hidden_request_done(早释放)
     D->>D: kv_done ∧ hidden_done → _commit_transfer_to_req
