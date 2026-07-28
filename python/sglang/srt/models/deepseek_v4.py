@@ -2255,12 +2255,21 @@ class DeepseekV4Model(nn.Module):
         input_embeds: Optional[torch.Tensor],
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
+        incoming_pd_aux_hidden_states: List[torch.Tensor] = []
         if self.pp_group.is_first_rank:
             hidden_states = self.embed_tokens(input_ids)
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         else:
             assert pp_proxy_tensors is not None
             hidden_states = pp_proxy_tensors["hidden_states"]
+            incoming_pd_aux_hidden_states = [
+                pp_proxy_tensors[key]
+                for key in sorted(
+                    key
+                    for key in pp_proxy_tensors.tensors
+                    if key.startswith("pd_aux_hidden_states_")
+                )
+            ]
             # Unflatten 2D PP IPC tensor back to 3D mHC shape.
             if hidden_states.ndim == 2:
                 hidden_states = hidden_states.view(
@@ -2299,7 +2308,8 @@ class DeepseekV4Model(nn.Module):
                 "DeepSeek-V4 prefill context parallelism (attn_cp_size > 1). Disable one "
                 "of them: DSpark static-verify is CP-off for v1."
             )
-        dspark_aux_hidden_states: List[torch.Tensor] = []
+        # Carry aux rows captured by earlier PP ranks, then append local layers.
+        pd_aux_hidden_states: List[torch.Tensor] = list(incoming_pd_aux_hidden_states)
         # DSpark aux capture needs the per-layer eager loop (TBO's overlapped
         # execution cannot expose per-layer completed hidden states), so skip
         # TBO when capturing -- a perf-only downgrade, not a correctness one.
@@ -2341,7 +2351,7 @@ class DeepseekV4Model(nn.Module):
                         )
                     else:
                         completed = hidden_states
-                    dspark_aux_hidden_states.append(completed.mean(dim=1))
+                    pd_aux_hidden_states.append(completed.mean(dim=1))
             if use_fused and last_layer is not None:
                 hidden_states = last_layer.hc_post(
                     hidden_states, prev_residual, prev_post, prev_comb
@@ -2357,8 +2367,14 @@ class DeepseekV4Model(nn.Module):
             )
 
         if not self.pp_group.is_last_rank:
-            # Flatten 3D mHC tensor for PP IPC.
-            return PPProxyTensors({"hidden_states": hidden_states.flatten(1)})
+            # Flatten 3D mHC tensor for PP IPC and propagate PD aux rows.
+            proxy_tensors = {"hidden_states": hidden_states.flatten(1)}
+            if capture_dspark:
+                for idx, aux_hidden in enumerate(pd_aux_hidden_states):
+                    proxy_tensors[f"pd_aux_hidden_states_{idx}"] = (
+                        aux_hidden.flatten(1) if aux_hidden.ndim == 3 else aux_hidden
+                    )
+            return PPProxyTensors(proxy_tensors)
 
         pre_hc_head = hidden_states.flatten(1)
 
@@ -2368,7 +2384,7 @@ class DeepseekV4Model(nn.Module):
         hidden_states = self.norm(hidden_states)
 
         if capture_dspark:
-            return (hidden_states, pre_hc_head), dspark_aux_hidden_states
+            return (hidden_states, pre_hc_head), pd_aux_hidden_states
 
         return hidden_states, pre_hc_head
 
@@ -2447,14 +2463,16 @@ class DeepseekV4ForCausalLM(nn.Module):
         return self.model.get_input_embeddings()
 
     def set_dspark_layers_to_capture(self, layer_ids: List[int]) -> None:
-        if not self.pp_group.is_last_rank:
-            return
         if layer_ids is None:
             raise ValueError(
                 "DSPARK requires explicit layer_ids for aux hidden capture."
             )
+        layer_ids = [int(x) for x in layer_ids]
+        # PP-aware PD PoC: enable on every PP rank. Ranks that do not own target
+        # layers still must forward proxy-carried aux rows to later ranks; the
+        # local layer loop simply appends nothing when there is no overlap.
         self.capture_aux_hidden_states = True
-        self.model.dspark_layers_to_capture = list(layer_ids)
+        self.model.dspark_layers_to_capture = layer_ids
 
     def determine_num_fused_shared_experts(self):
         self.num_fused_shared_experts = 0

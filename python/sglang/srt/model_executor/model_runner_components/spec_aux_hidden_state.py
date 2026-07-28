@@ -102,7 +102,42 @@ def _resolve_dflash_aux_hidden_state(
     spec_algorithm: SpeculativeAlgorithm,
     is_draft_worker: bool,
 ) -> None:
-    if spec_algorithm.is_dflash_family() and not is_draft_worker:
+    if is_draft_worker:
+        return
+
+    # Minimal DSpark PD PoC: Prefill can capture aux hidden without enabling
+    # --speculative-algo DSPARK (Decode still runs DSPARK).
+    if (
+        not spec_algorithm.is_dflash_family()
+        and server_args.disaggregation_mode == "prefill"
+    ):
+        try:
+            from sglang.srt.speculative.dspark_components.dspark_disaggregation import (
+                infer_dspark_pd_target_layer_ids,
+                is_dspark_pd_prefill_capture_enabled,
+            )
+
+            if is_dspark_pd_prefill_capture_enabled(server_args):
+                target_layer_ids = infer_dspark_pd_target_layer_ids(
+                    server_args=server_args, hf_config=model_config.hf_config
+                )
+                if target_layer_ids:
+                    config.dflash_use_aux_hidden_state = True
+                    config.dflash_draft_num_layers = len(target_layer_ids)
+                    config.dflash_target_layer_ids = target_layer_ids
+                    logger.info(
+                        "DSpark PD Prefill capture enabled without local DSPARK "
+                        "(layers=%s, pp_size=%s).",
+                        target_layer_ids,
+                        server_args.pp_size,
+                    )
+                    return
+        except Exception:
+            logger.warning(
+                "Failed to enable DSpark PD Prefill aux capture.", exc_info=True
+            )
+
+    if spec_algorithm.is_dflash_family():
         from sglang.srt.speculative.dflash_utils import parse_dflash_draft_config
 
         # Select target layers to capture for building draft context features.

@@ -673,7 +673,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         # capture_hidden_mode=None means no override: derive from
         # SB.return_hidden_states / spec_info.capture_hidden_mode.
         if capture_hidden_mode is None:
-            if batch.return_hidden_states:
+            pd_dspark_prefill_capture = False
+            try:
+                from sglang.srt.runtime_context import get_server_args
+                from sglang.srt.speculative.dspark_components.dspark_disaggregation import (
+                    is_dspark_pd_prefill_capture_enabled,
+                )
+
+                pd_dspark_prefill_capture = is_dspark_pd_prefill_capture_enabled(
+                    get_server_args()
+                )
+            except Exception:
+                pd_dspark_prefill_capture = False
+
+            if batch.return_hidden_states or pd_dspark_prefill_capture:
                 capture_hidden_mode = CaptureHiddenMode.FULL
             elif batch.spec_info is not None:
                 capture_hidden_mode = getattr(

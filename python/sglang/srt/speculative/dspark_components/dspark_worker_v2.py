@@ -495,6 +495,20 @@ class DSparkWorkerV2(BaseSpecWorker):
                 )
             return self._decode_idle_result(on_publish=on_publish)
 
+        # Minimal DSpark PD PoC: inject Prefill-transferred aux-hidden tail into
+        # the decode-side draft KV before the first draft step.
+        if getattr(draft_input, "pd_hidden_pending_inject", False):
+            from sglang.srt.speculative.dspark_components.dspark_disaggregation import (
+                maybe_inject_pd_prefill_hidden,
+            )
+
+            maybe_inject_pd_prefill_hidden(
+                draft_input=draft_input,
+                batch=batch,
+                kv_injector=self._kv_injector,
+                req_to_token_pool=self.model_runner.req_to_token_pool,
+            )
+
         batch.seq_lens.record_stream(
             torch.get_device_module(self.device).current_stream()
         )

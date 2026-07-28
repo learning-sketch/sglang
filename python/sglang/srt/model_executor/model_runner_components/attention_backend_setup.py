@@ -57,6 +57,9 @@ def configure_aux_hidden_state_capture(
             model.set_dspark_layers_to_capture(dflash_target_layer_ids)
         elif hasattr(model, "set_dflash_layers_to_capture"):
             model.set_dflash_layers_to_capture(dflash_target_layer_ids)
+        elif hasattr(model, "set_dspark_layers_to_capture"):
+            # Prefill PD PoC: capture DSpark aux layers without a local DSPARK worker.
+            model.set_dspark_layers_to_capture(dflash_target_layer_ids)
         else:
             raise ValueError(
                 f"Model {model.__class__.__name__} implements neither "

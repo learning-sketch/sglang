@@ -669,8 +669,64 @@ class SchedulerDisaggregationPrefillMixin:
                         req.output_dsa_topk_indices = dsa_topk_indices[i].cpu().clone()
                     else:
                         req.output_dsa_topk_indices = None
+                elif (
+                    self.spec_algorithm.is_dspark()
+                    or getattr(self.disagg_metadata_buffers, "dspark_prefill_tail_len", 0)
+                    > 0
+                ):
+                    # Minimal DSpark PD PoC: Prefill may omit --speculative-algo
+                    # DSPARK; still transfer last aux-hidden row + short tail.
+                    from sglang.srt.speculative.dspark_components.dspark_disaggregation import (
+                        populate_req_dspark_pd_hidden,
+                    )
+
+                    hidden_states = getattr(logits_output, "hidden_states", None)
+                    if hidden_states is None:
+                        req.hidden_states_tensor = None
+                        req.prefill_tail_hidden_states_tensor = None
+                        req.prefill_tail_valid_mask = None
+                        req.output_dsa_topk_indices = None
+                    elif hidden_states.shape[0] == len(batch.reqs):
+                        populate_req_dspark_pd_hidden(
+                            req,
+                            hidden_states=hidden_states,
+                            token_start=i,
+                            token_end=i + 1,
+                            tail_len=int(
+                                getattr(
+                                    self.disagg_metadata_buffers,
+                                    "dspark_prefill_tail_len",
+                                    0,
+                                )
+                            ),
+                        )
+                        req.output_dsa_topk_indices = None
+                    else:
+                        # FULL capture: rows are flattened tokens across the batch.
+                        if batch.extend_lens is not None:
+                            token_start = int(sum(batch.extend_lens[:i]))
+                            token_end = token_start + int(batch.extend_lens[i])
+                        else:
+                            token_start = i
+                            token_end = i + 1
+                        populate_req_dspark_pd_hidden(
+                            req,
+                            hidden_states=hidden_states,
+                            token_start=token_start,
+                            token_end=token_end,
+                            tail_len=int(
+                                getattr(
+                                    self.disagg_metadata_buffers,
+                                    "dspark_prefill_tail_len",
+                                    0,
+                                )
+                            ),
+                        )
+                        req.output_dsa_topk_indices = None
                 else:
                     req.hidden_states_tensor = None
+                    req.prefill_tail_hidden_states_tensor = None
+                    req.prefill_tail_valid_mask = None
                     req.output_dsa_topk_indices = None
                 if req.return_logprob:
                     assert extend_logprob_start_len_per_req is not None
