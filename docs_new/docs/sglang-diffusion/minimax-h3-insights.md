@@ -1,7 +1,205 @@
 # MiniMax-H3 洞察文档
 
 > 基于 MiniMax 官方模型卡与 SGLang 上游 PR [#33275](https://github.com/sgl-project/sglang/pull/33275)（已合并）及后续 CI/并行相关 PR 整理。  
-> 目标读者：需要快速理解 **模型能力、架构取舍、SGLang 原生支持路径** 的工程师与研究者。
+> 本文前半给想先跑通的人；§2 起是架构与实现细节。
+
+### 怎么读
+
+| 你的目标 | 读这些 |
+| --- | --- |
+| 只想知道这是什么、能不能用 | §0.1–§0.2 |
+| 想选对任务并发出第一次请求 | §0.3–§0.5、§0.7 |
+| 想分清本地开源 vs 官方产品 | §0.4、§1.1 |
+| 想懂内部怎么拼起来 | §2（尤其 §2.4–§2.10） |
+| 想部署调优 / 避坑 | §4–§6、§0.7 |
+
+---
+
+## 0. 给小白的快速入门
+
+### 0.1 三十秒直觉
+
+MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成器**：
+
+1. 你给它一段文字，也可以再给首尾帧、参考图、参考视频、参考音频。
+2. 它不是先出无声视频再配乐，而是 **一次生成同步的画面 + 立体声**。
+3. 你拿到的是一个 MP4：画面约 24 帧/秒，声音是 32 kHz 双声道。
+4. 用 SGLang 在本地部署时，跑的是开源主干 **H3-Base**（默认约 768p 短边画质），不是完整商业 App 的全部流水线。
+
+一句话：`文字/参考材料 → 服务器思考几十步 → 下载带声音的短视频`。
+
+### 0.2 你会碰到的词（术语表）
+
+| 词 | 人话 |
+| --- | --- |
+| **DiT** | 生成主干网络。像“画家大脑”，一步步把噪声画成视频/音频。 |
+| **VAE** | 压缩/解压器。先把图像声音压成更小的 **latent**，生成后再解压回像素和波形。 |
+| **latent** | 压缩后的中间表示。模型主要在 latent 上算，不直接在原始像素上硬算。 |
+| **packed sequence** | 把文字、条件、音频、待生成视频排成 **一长串 token 行**，让同一个 DiT 一起看。 |
+| **AdaLN** | 按“这是文字/视频/音频行 + 当前时间步”调节每一层怎么处理该行。 |
+| **CFG / CFG 蒸馏** | 常见生成模型会跑正负两路提示；H3 发布权重已蒸馏成 **只跑一路**，所以不能开 CFG 并行。 |
+| **flow shift** | 控制“去噪日程”偏快还是偏慢；H3 里视频、音频各有一个（`flow_shift` / `audio_flow_shift`）。 |
+| **FL2VA** | 权重分区名：服务文字生成，以及首帧/末帧定格动画。启动用 `--model-variant fl2va`。 |
+| **Ref2VA** | 权重分区名：服务参考图/视频/音频，以及视频改创（V2V）。启动用 `--model-variant ref2va`。 |
+| **t2va / fl2va / ref2va** | 请求里的 `task` 字段：纯文生、首末帧生、参考生。 |
+| **Ulysses** | 一种多卡并行：把很长的 packed 序列切开到多张 GPU 上算注意力。 |
+| **TP（张量并行）** | 另一种多卡并行：把同一层权重切到多卡。可与 Ulysses 组合。 |
+| **quality** | 请求里的采样档位（lossless/high/medium/low）。影响生成轨迹，不是单纯压文件。 |
+| **output_quality** | 只影响最终文件压缩，不改变模型怎么生成。 |
+
+### 0.3 任务怎么选（决策树）
+
+```text
+你有什么输入？
+│
+├─ 只有文字
+│    → task=t2va，启动 --model-variant fl2va
+│
+├─ 有一张/两张图，并且希望它就是成片的第一帧和/或最后一帧
+│    → task=fl2va，启动 --model-variant fl2va
+│    → frame_index 只允许 0（首帧）、-1（末帧）、或两者都给
+│
+├─ 有参考图/参考视频/参考音频，用来约束身份、风格、动作、配乐等
+│    → task=ref2va，启动 --model-variant ref2va
+│    → 图是“参考”，不保证像素级贴成首帧
+│
+└─ 想改一段已有视频的场景/风格，但仍跟着原片感觉走（V2V）
+     → 仍然是 task=ref2va + conditions 里放 video
+     → 没有单独的 v2v task
+```
+
+快速对照：
+
+| 你想要的效果 | task | `--model-variant` |
+| --- | --- | --- |
+| 纯文生音视频 | `t2va` | `fl2va` |
+| 给定首尾帧接着动 | `fl2va` | `fl2va` |
+| 参考人物/风格/配乐 | `ref2va` | `ref2va` |
+| 视频改创 V2V | `ref2va` | `ref2va` |
+
+### 0.4 本地开源 vs 官方产品
+
+| | 本地 SGLang（本文重点） | 官方产品 / API |
+| --- | --- | --- |
+| 跑什么 | 开源 **H3-Base**（FL2VA / Ref2VA） | 常含 Context-IR 预处理 + Base +（可选）2K regenerate |
+| 典型分辨率 | 短边约 768p | 产品侧可到 2K 再生 |
+| Prompt 增强 | 需你自己写好 / 自建预处理 | Context-IR 可帮你理解和补全复杂多模态指令 |
+| 怎么用 | `sglang serve` + `/v1/videos` | Hailuo App / MiniMax API |
+| 许可 | Community License，商用前自己审 | 以平台条款为准 |
+
+结论：本地跑通 ≠ 自动复现官网最强效果；缺的主要是 **Context-IR** 和 **2K regenerate**（二者目前未随 SGLang 开源权重完整提供）。
+
+### 0.5 最小可跑通路径（T2VA）
+
+前置：
+
+- 已安装：`uv pip install "sglang[diffusion]" --prerelease=allow`
+- 推荐硬件：认真体验用 **4×H100 或 4×H200**；2×RTX 5090 能跑但明显更慢；单卡消费级通常不够舒服。
+- Hugging Face 如需鉴权：准备好 `HF_TOKEN`。
+
+**1）启动服务（4×H100 示例）**
+
+```bash
+sglang serve \
+  --model-path MiniMaxAI/MiniMax-H3 \
+  --model-variant fl2va \
+  --num-gpus 4 \
+  --tp-size 2 \
+  --ulysses-degree 2 \
+  --performance-mode speed \
+  --port 30010
+```
+
+若是 4×H200，可改成 `--ulysses-degree 4` 且通常不需要 `--tp-size 2`。
+
+**2）提交一个 5 秒 T2VA 任务**
+
+```bash
+video_id=$(
+  curl -sS -X POST http://127.0.0.1:30010/v1/videos \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "MiniMaxAI/MiniMax-H3",
+      "prompt": "At night, three cats march through a bedroom playing tiny brass instruments, then file out.",
+      "seconds": 5,
+      "task": "t2va",
+      "conditions": [],
+      "target": {
+        "short_edge": 768,
+        "aspect_ratio": "16:9",
+        "duration_seconds": 5.0
+      },
+      "num_inference_steps": 50,
+      "flow_shift": 12.0,
+      "audio_flow_shift": 3.0,
+      "seed": 1101
+    }' | jq -r '.id'
+)
+echo "job: $video_id"
+```
+
+**3）等待完成并下载**
+
+```bash
+while true; do
+  status=$(curl -sS "http://127.0.0.1:30010/v1/videos/${video_id}" | jq -r '.status')
+  echo "status=$status"
+  [ "$status" = "completed" ] && break
+  [ "$status" = "failed" ] && exit 1
+  sleep 2
+done
+
+curl -sS -L "http://127.0.0.1:30010/v1/videos/${video_id}/content" \
+  -o minimax-h3-t2va.mp4
+```
+
+成功标志：得到可播放的 `minimax-h3-t2va.mp4`（有画面 + 有声音）。更完整的 FL2VA / Ref2VA / 硬件选择器见 cookbook：`docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`。
+
+### 0.6 请求里最重要的字段
+
+| 字段 | 含义 |
+| --- | --- |
+| `task` | `t2va` / `fl2va` / `ref2va` |
+| `prompt` | 文本描述；Ref2VA 里可用 `<Picture 1>` / `<Video 1>` / `<Audio 1>` 点名材料 |
+| `conditions` | 图片/视频/音频条件列表；顺序要和 prompt 标签一致 |
+| `target.duration_seconds` | 时长，必须在 4–15 秒 |
+| `target.short_edge` | 常用 768 |
+| `target.aspect_ratio` | 如 `16:9`；Ref2VA 的 `auto` 会落到模型默认 16:9，不继承参考几何 |
+| `flow_shift` / `audio_flow_shift` | 视频/音频去噪日程，常用 `12.0` / `3.0` |
+| `seed` | 随机种子；多输出时按 `seed + 输出序号` 展开 |
+| `quality` | 可选采样档；默认可理解为无损路径 |
+
+### 0.7 常见坑 FAQ
+
+1. **`--model-path` 指到了 `FL2VA/` 子目录**  
+   不要这样。指仓库根 `MiniMaxAI/MiniMax-H3`，用 `--model-variant` 选分区。
+
+2. **task 和 variant 不匹配**  
+   `t2va`/`fl2va` 必须配 `fl2va` 权重；`ref2va`/V2V 必须配 `ref2va` 权重。
+
+3. **以为有 `task=v2v`**  
+   没有。V2V = `task=ref2va` + `conditions` 里的 video。
+
+4. **Ref2VA 的 `<Picture 1>` 和 conditions 对不上**  
+   prompt 标签按模态从 1 计数，且必须与 `conditions` 顺序语义一致。
+
+5. **把参考图当成首帧**  
+   参考图走 Ref2VA，不保证像素级贴成第一帧；要定格首帧请用 FL2VA + `frame_index: 0`。
+
+6. **容器里 `file:///...` 找不到**  
+   URI 是服务器进程视角的路径；Docker 需挂载 host 媒体目录。
+
+7. **开了 `torch.compile` 或 CFG parallel**  
+   H3 推荐路径保持 eager；CFG parallel 会被拒绝。`torch.compile` 会改数值，不适合做一致性对照。
+
+8. **本地效果不如官网**  
+   本地主要是 H3-Base；官网还有 Context-IR 与 2K 再生等环节。
+
+9. **时长/分辨率乱填**  
+   时长 4–15 秒；质量对照常用短边 768、50 steps、`flow_shift=12`、`audio_flow_shift=3`。
+
+10. **`quality` 和 `output_quality` 搞混**  
+    前者改生成过程，后者只改封装压缩。
 
 ---
 
@@ -48,10 +246,11 @@ SGLang Diffusion 当前原生支持的是 **H3-Base** 的两个任务分区权�
 - **V2V 不是独立 task**，而是 `ref2va` + video reference。
 - `--model-path` 指向仓库根 ID，由 SGLang 按 `--model-variant` 映射到 `FL2VA` / `Ref2VA` 子目录；不要手动指到子目录。
 - 发布权重是 **CFG-distilled**：只有一条 positive denoise branch，因此 **不支持 CFG parallel**。
+- 与 §0.4 对照阅读：下面从 §2 开始进入实现细节。
 
 ---
 
-## 2. 架构结构
+## 2. 架构结构（进阶）
 
 ### 2.1 端到端数据流
 
@@ -708,6 +907,8 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG 优先时 Cache-DiT
 
 ## 6. 工程含义与使用建议
 
+入门避坑先看 §0.7。这里给部署/评测向的浓缩建议：
+
 1. **先选对分区**：T2VA/FL2VA 用 `fl2va`；任何参考/V2V 用 `ref2va`。
 2. **一致性与压测分开**：GT / 对齐实验用 eager BF16/FP32 + lossless；延迟实验再开 Cache-DiT / FP8 / BCG。
 3. **H100 优先 TP2+Ulysses2**；内存更紧时 TP4 或 FSDP，而不是假设 FSDP 更快。
@@ -719,7 +920,7 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG 优先时 Cache-DiT
 ## 7. 参考资料
 
 - 模型卡：<https://huggingface.co/MiniMaxAI/MiniMax-H3>
-- SGLang cookbook：`docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`
+- SGLang cookbook（交互式部署/请求模板）：`docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`
 - 主支持 PR：<https://github.com/sgl-project/sglang/pull/33275>
 - 核心实现入口：
   - `python/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py`
