@@ -151,6 +151,179 @@ SGLang 按发布契约物化 packed sequence：
 
 FL2VA keyframe 签名仅允许：`[0]`、`[-1]`、`[0, -1]`。
 
+`token_tags` 语义（AdaLN modality index，padding 为 `-1`，进 block 前 `clamp(min=0)`）：
+
+| tag | 含义 | 典型行 |
+| ---: | --- | --- |
+| 0 | VIDEO | keyframe / ref 视觉行、video target 行 |
+| 1 | TEXT | Qwen 文本行（FL2VA 中视觉 prompt span 可由 presentation 覆盖） |
+| 2 | AUDIO | audio ref / audio target 行（channel-major） |
+| -1 | PADDING | 对齐到 64 的填充行 |
+
+### 2.4 模块功能关联：谁产出什么、谁消费什么
+
+H3 的原生 pipeline 不是“encoder 直接喂 DiT”，而是 **先把多模态材料编码成行向量契约，再在 denoise stage 里组装 packed 输入**。各 stage 的职责与数据键如下。
+
+```text
+请求 (task/conditions/target/seed)
+        │
+        ▼
+PartitionAdmission ── 校验 task ↔ FL2VA/Ref2VA 分区
+        │
+        ├─ TextEncoding ──► extra[minimax_h3_text_embeddings]
+        │                    {positive: {hidden_states[L,5120], text_len, text_token_tags}}
+        │
+        ├─ VisualEncoding ──► keyframe_cond_rows / reference_image_rows / reference_video_rows
+        │                      (patch 后的视觉 latent 行, 宽 96 = 24×1×2×2)
+        │
+        ├─ AudioEncoding ──► reference_audio_rows
+        │                     (channel-major audio latent 行, 宽 32)
+        │
+        ├─ LatentPreparation ──► initial_video_rows [V,96], initial_audio_rows [A,32]
+        │                         (独立 RNG：同 seed 分别 seed 视频/音频 generator)
+        │
+        ├─ TimestepPreparation ──► sigmas.video / sigmas.audio
+        │                           (flow_shift / audio_flow_shift 各自 time-shift)
+        │
+        ▼
+Denoising ── 组装 packed layout + DiT forward + Euler η=0 更新 target 行
+        │
+        ▼
+Decoding ── unpatchify video / unpack audio → VisualVAE + AudioVAE → MP4
+```
+
+功能关联可以概括成四条边：
+
+1. **语义边（Text → DiT）**  
+   Qwen3-VL 产出 `hidden_states[L,5120]`。它们不直接进 50 层 DiT block，而是先经 `condition_proj`（5120→5376）+ `token_refiner`（2 层）变成 **refined text rows**，再 scatter 到 packed 序列的 text 槽位。`text_token_tags` 覆盖 packed 的 text 区间，用于 AdaLN modality 选择。
+
+2. **条件边（VAE → packed cond/ref rows）**  
+   Visual/Audio VAE 只编码 **条件材料**（首末帧、参考图/视频/音频），不编码将要生成的 target。这些行在 denoise 中被 pin 住：每步重写到 buffer，但不做 Euler 更新。Target 行才吃初始噪声并逐步更新。
+
+3. **几何边（canvas/shape → packed indices）**  
+   Pre-queue 的 `resolved_v2` shape 决定 `latent_t/h/w`、`audio_t`。`packed_sequence` 据此生成 `text_pos / img_pos / audio_pos / update_mask / img_position_ids / cu_seqlens`。没有这份几何，`_embed` 不知道把哪段 latent 写到哪一行。
+
+4. **时间边（sigmas → unique_timesteps / AdaLN）**  
+   视频与音频各有 sigma 日程。每步把不同行映射到不同 timestep：text/padding/video-target 跟 `t_video`；audio-target 跟 `t_audio`；视觉条件行钉在 `max(t_video, imgvid_cond_noise_aug)`（默认锚点约 `0.999`）；音频参考行钉在 `max(t_audio, audio_ref_cond_noise_aug)`（默认 `1.0`）。`inverse_indices` + `token_tags` 合成 `combined_indices`，供 indexed AdaLN 查表。
+
+### 2.5 DiT 输入如何组装：从行向量到 `_embed`
+
+DiT forward 的入口不是 `[B,C,T,H,W]` 张量，而是 **packed keyword contract**。服务热路径（`MiniMaxH3DenoiseBranch.forward_kwargs`）每步组装：
+
+| kwarg | 来源 | 作用 |
+| --- | --- | --- |
+| `x` | `[1,S,96]` 持久 buffer | 全序列视频行槽；cond/ref 只写一次，之后只刷新 target |
+| `audio_x` | `[1,S,32]` 持久 buffer | 全序列音频行槽；同上 |
+| `prompt_embeds` | TextEncoding → 可选预计算 refine | 文本条件；若已 refine 则附带 `refined_prompt_embeds_length` |
+| `img_position_ids` | packed 几何网格 | MM-RoPE 的 `(t,h,w)` |
+| `rope_cache` | 请求级预计算 | 当前 Ulysses rank 的局部 cos/sin |
+| `unique_timesteps` / `inverse_indices` | 逐步 host 去重 | 行 → timestep 槽 |
+| `block_token_tags` / `block_combined_indices` | 局部 shard | AdaLN modality 索引 |
+| `*_pos_info` | packed 位置 | text/img/audio/infer-output 行号 |
+| `local_embedding_layout` | Ulysses 局部布局 | 避免每步 `nonzero` 扫描 |
+| `packed_seq_params` / `refiner_packed_seq_params` | cu_seqlens | varlen attention / refiner 窗口 |
+| `update_mask` | packed | 选出可更新的视频 target 行（服务路径常 `skip_mask_out_condition=True`，由 loop 自己只更新 target slice） |
+
+#### 组装步骤 A：模态行准备（DiT 之外）
+
+```text
+视频噪声 [1,24,T,H,W]
+  └─ patchify(1,2,2) ──► video_rows [T*(H/2)*(W/2), 96]
+
+音频噪声 [A,32]  （A = audio_t * 2ch，左右声道行交替/channel-major）
+
+条件视觉 latent ──► cond_rows [C,96]   （FL2VA keyframe 或 Ref2VA 参考块）
+条件音频 latent ──► audio_ref_rows [R,32]
+```
+
+有条件时，target 噪声被 scatter 进“全 image/audio 行”缓冲：`update_mask==True` 的位置放噪声，前面 cond/ref 槽留给锚点行。
+
+#### 组装步骤 B：`_embed`（DiT 内，每步或 BCG break 点）
+
+`MiniMaxH3DiTModel._embed` 在 **当前 Ulysses rank 的行分片** `[row_start, row_stop)` 上构造：
+
+```text
+decoder_input [S_local, 5376] bf16
+t_emb         [M, time_embed_dim] fp32   ← TimeEmbedder(unique_timesteps)
+```
+
+写入规则：
+
+```text
+1) Text
+   prompt_embeds[L,5120]
+     → (若未预计算) condition_proj → token_refiner(2 blocks)
+     → text_embed[L,5376]
+     → 按 text_pos ∩ local shard 写入（serving 用 index_copy 连续前缀）
+
+2) Video
+   x 中本 rank 拥有的 img_global_ids 行
+     → video_patch_proj (fp32 Linear: 96 → 5376, gather_output)
+     → cast bf16 写入 img_row_ids
+
+3) Audio
+   audio_x 中本 rank 拥有的 audio_global_ids 行
+     → audio_patch_proj (fp32 Linear: 32 → 5376)
+     → cast bf16 写入 audio_row_ids
+
+4) Padding / 未覆盖行
+   trusted layout 下先 empty 再对 live 后缀 zero；direct caller 用 zeros + index_add
+```
+
+要点：
+
+- **patch/time/final 投影保持 fp32**，只在写入 bf16 序列时 cast。
+- Text refine 是请求静态的：denoise stage 会调用 `refine_prompt_embeds` 一次，后续步跳过 refiner。
+- RoPE cache 同样请求静态：按 Ulysses 局部行预计算 `cos/sin`。
+- Ulysses 只在 Attention 内做 sequence↔heads all-to-all；`_embed`、MLP、FinalLayer 都是 **row-local**。
+
+#### 组装步骤 C：block stack 与输出选择
+
+```text
+adaln_input = SiLU(t_emb).bf16
+
+combined_indices[i] = inverse_indices[i] * 3 + token_tags[i].clamp(min=0)
+                      └─ 选哪组 timestep 调制      └─ 选哪 modality 分支
+
+for block in blocks[50]:
+    AdaLN → Norm → Attn(+QK-Norm, RoPE) → gate
+    AdaLN → Norm → MLP → gate
+
+FinalLayer:
+    单 modality AdaLN(shift/scale) → fp32
+    → video_out / audio_out 对所有 local 行做 GEMM
+    → (Ulysses all_gather 行) → index_select 出
+         img_pos_for_infer_output（仅 video target）
+         audio_pos（音频行；ref 行随后由 mask/slice 丢弃更新）
+    → (TP all_gather 输出列)
+```
+
+服务路径里 DiT 返回的 video velocity 已是 **target 行**；audio velocity 再按 `audio_target_slice` 切片后做 Euler 更新。条件行每步仍出现在 packed 注意力上下文中（提供条件信息），但状态被 pin 在 noise-aug 锚点，不跟随 target 更新。
+
+### 2.6 一步 denoise 的张量协作（功能时序）
+
+```text
+step k:
+  1. 把 video_rows / audio_rows 的 target 子集 index_copy 进 x/audio_x buffer
+  2. 取出预计算的 (unique_timesteps, inverse_indices, block_combined)
+  3. DiT.forward → (v_video_target, v_audio_all)
+  4. Euler η=0 只更新 target slice:
+       denoised = state + sigma_t * velocity
+       state ← (1 - σ_{k+1}/σ_k) * denoised + (σ_{k+1}/σ_k) * state
+  5. cond/ref 行保持步骤 0 钉入的锚点值
+```
+
+因此“编码组装”与“生成更新”的边界是：
+
+| 行类型 | 谁写入初值 | 每步是否进 Attention | 是否 Euler 更新 |
+| --- | --- | --- | --- |
+| text | TextEncoder → refine → `_embed` | 是 | 否（无 latent 状态） |
+| imgvid cond / visual ref | VisualVAE (+ optional noise aug) | 是 | 否（pin） |
+| audio ref | AudioVAE (+ optional noise aug) | 是 | 否（pin） |
+| video target | LatentPreparation 噪声 | 是 | 是 |
+| audio target | LatentPreparation 噪声 | 是 | 是 |
+| padding | 零填充 | 是（占位对齐） | 否 |
+
 ---
 
 ## 3. 创新点
@@ -224,6 +397,14 @@ Pipeline stages（严格顺序）：
 9. `Decoding`（video + audio → MP4）
 
 服务形态：**仅 monolithic**（`supports_disaggregation=False`）。对外暴露异步 OpenAI-compatible `/v1/videos`。
+
+Stage 之间不共享 Diffusers 式 `prompt_embeds + latents` 单一接口，而是通过 `batch.extra` 的 H3 专用键传递契约对象；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.6。
+
+TextEncoding 额外职责：
+
+- 用 H3 `processor` + 仓库 tokenizer 构造 presentation（含 `<Picture n>` / `<Video n>` / `<Audio n>` 材料标签与特殊 token）。
+- 只取 Qwen3-VL 第 50 层 hidden states；多输出请求可对相同 fingerprint 去重，encoder DP 时按 presentation 分发整请求而非 stack batch。
+- 产出的 `text_token_tags` 在 denoise 组装时覆盖 packed `token_tags` 的 text 区间（允许 FL2VA 视觉 span 覆盖默认 TEXT tag）。
 
 ### 4.2 请求契约
 
