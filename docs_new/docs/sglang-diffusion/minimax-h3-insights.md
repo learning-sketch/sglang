@@ -324,6 +324,181 @@ step k:
 | audio target | LatentPreparation 噪声 | 是 | 是 |
 | padding | 零填充 | 是（占位对齐） | 否 |
 
+### 2.7 VisualVAE / AudioVAE 编码配方
+
+条件材料在进 DiT 之前，必须变成 **与 target 行同宽的 packed rows**。视觉与音频走不同的数值契约。
+
+#### VisualVAE：三类材料，两种几何
+
+| 材料链 (`material_chain`) | 任务 | 几何策略 | 编码 API |
+| --- | --- | --- | --- |
+| `image.target_canvas` | FL2VA | 对齐到 **target canvas**（与输出画布同尺寸） | `encode_images` |
+| `image.reference_preserve` | Ref2VA | **自身几何**：短边 2048、可 upscale、LANCZOS、对齐到 32；**不继承** target canvas | `encode_images`（同 keyframe recipe） |
+| `video.reference_preserve` / `video_audio.reference_preserve` | Ref2VA | 按 plan 解析的参考视频尺寸/帧数解码后编码 | `encode_videos` |
+
+共同视觉 tokenizer 配方（`minimax_h3_encode_keyframe_cond_rows` / `encode_reference_video_rows`）：
+
+```text
+PIL / RGB frames
+  → scoped fp32 VAE weights
+  → fork_rng + seed=42  （VAE 后验是 SAMPLED，seed 是契约的一部分，与 request seed 无关）
+  → encode_images / encode_videos (use_fp16_latent=True)
+  → z.cpu().float()
+  → (z - latents_mean) / latents_std     # loader 注入的 24-ch stats
+  → patchify [1,2,2]                     # → rows [n, 96] fp32
+```
+
+要点：
+
+- FL2VA 的同一批 prepared keyframe 图像 **同时喂给 Qwen TextEncoding 与 VisualVAE**（`minimax_h3_prepared_keyframes` 按请求缓存）。
+- Ref2VA 参考图用独立 `reference_image_short_edge_v1` 策略；latent 网格是 `H/16 × W/16`，与 target 的 `latent_h/w` 可以不同。
+- 参考视频：ffmpeg 一次解码 + transform + truncate（支持 `start_time_seconds`）；音画 seek 对齐。编码后丢弃 RGB frames，避免双份驻留。
+- 多 keyframe / 多参考在同一 `minimax_h3_scoped_encode_fp32` 作用域内完成，避免反复切 VAE dtype。
+- Parallel tiling 时各 replica 编码完整 tile 再 gather，再做 seeded posterior sample。
+
+#### AudioVAE：均值编码 + 确定性后端
+
+```text
+uri → localize
+  → probe facts (sample_rate / has_audio / duration)
+  → load waveform
+       · pure audio: 保留源采样率，归一化到 stereo
+       · video/video_audio: 抽 44.1 kHz stereo PCM
+  → resample → 32 kHz
+  → _AudioVAEDeterminismContext
+       (关 TF32 / 关 cuDNN / SDP=math，保证 encode 可复现)
+  → AudioVAE posterior MEAN（不采样）
+  → normalize by audio latents_mean/std
+  → channel-major rows [T*2, 32] fp32
+```
+
+特殊情况：`video.reference_preserve` 且源无音轨时，仍保留视觉 block 的请求顺序位置，但音频条件写成 `ref_audio_t=0`、空 rows，避免打乱 Ref2VA block 顺序。`video_audio` 则 fail-closed：承诺有音频却缺失会报错。
+
+#### Condition noise aug（可选）
+
+在 denoise 组装前，可对 clean cond/ref rows 做 RF 混合：
+
+```text
+noised = noise_aug * clean + (1 - noise_aug) * noise
+```
+
+- `noise_aug=1.0`：保持干净锚点（默认视觉/音频锚点 timestep 接近 1）。
+- 视觉噪声按每个 condition 的 `(latent_t,h,w)` 独立 generator（同 request seed）绘制，再 patchify。
+- 该值同时作用到 **行数值** 与 DiT 行 timestep（`max(t_video, noise_aug)` / `max(t_audio, noise_aug)`）。
+
+### 2.8 Text presentation：Qwen 看到什么
+
+TextEncoding 不直接把用户 prompt 丢进 Qwen；它先构造与条件对齐的 **presentation token 流**，并同步生成 `text_token_tags`（与 ids 等长，防止 AdaLN tag 漂移）。
+
+| 任务 | Presentation 形态 |
+| --- | --- |
+| `t2va` | 原文 prompt（无 vision block）；tags 全为 TEXT(1) |
+| `fl2va` | 对每个 keyframe：`<Picture i>: ` + `<\|vision_start\|>` + N×`<\|image_pad\|>` + `<\|vision_end\|>`，再接原文 prompt；vision block tags=VIDEO(0) |
+| `ref2va` | 按 `plan.materials` 顺序：`<Picture i>` / `<Audio j>` / `<Video k>` 标签；图像带 vision block；音频只有标签（**音频内容不进 Qwen**）；视频为时间戳文本 + 多个 VIDEO pad block；最后接原文 prompt |
+
+Ref2VA 视频时间戳规则：
+
+- Qwen3-VL temporal merge=2；奇数帧会重复末帧。
+- 每个 merged block 发 `\<{t:.1f} seconds\>`（banker’s rounding）+ vision block。
+- 纯 `video` 条件仅当 probe `has_audio=true` 时才额外贡献 `<Audio j>` 标签；`video_audio` 始终贡献 Audio 标签。
+
+Qwen 前向：
+
+```text
+presentation ids (+ pixel_values / image_grid_thw / video tensors)
+  → MiniMaxH3Qwen3VLEncoder.encode_ids
+  → hidden_states[L, 5120]   # 固定取第 50 层
+  → extra[minimax_h3_text_embeddings].positive
+       {hidden_states, text_len, text_token_tags}
+```
+
+随后 denoise 把 `text_token_tags` **覆盖** packed 序列 text 区间的默认 tag，使 FL2VA/Ref2VA 里 vision span 在 AdaLN 上走 VIDEO modality，而不是 TEXT。
+
+### 2.9 Ref2VA block 排序与 packed 布局
+
+Ref2VA 的关键约束是：**请求/plan 中的 material 顺序 = presentation 标签顺序 = packed ref blocks 顺序 = cond/ref rows 拼接顺序**。
+
+#### 排序源：`plan.materials`
+
+`_ref2va_ordered_blocks_and_rows` 按 materials 线性扫描，产出：
+
+```text
+blocks:  [{kind, latent_*/ref_audio_t}, ...]
+cond_rows:       cat(visual rows in that order)     # [C_vis, 96]
+audio_ref_rows:  cat(audio rows in that order)      # [C_aud, 32]
+```
+
+| material_chain | block.kind | 视觉行 | 音频行 |
+| --- | --- | --- | --- |
+| `image.reference_preserve` | `image` | 有（自身 HxW） | 无 |
+| `audio` | `audio` | 无 | 有（`ref_audio_t`） |
+| `video.reference_preserve` | `video` | 有（`latent_t,h,w`） | 有（可为 0） |
+| `video_audio.reference_preserve` | `video_audio` | 有 | 有（必须 >0） |
+
+#### Packed 物理布局
+
+```text
+[ text L
+| ref_block_0 ... ref_block_n     ← 按 materials 顺序展开
+| audio_target A(=audio_t*2)
+| video_target V
+| pad ]
+```
+
+每个 ref block 的内部展开：
+
+| kind | 在序列中的展开 | 时间原点 `t_cursor` 推进 |
+| --- | --- | --- |
+| `image` | 仅 visual rows | `+1` |
+| `audio` | 仅 audio rows（L/R channel-major） | `+ref_audio_t` |
+| `video` / `video_audio` | **先 audio rows，再 video rows**（共享同一 temporal origin） | `+max(ref_audio_t, video_t_span)` |
+
+RoPE 网格细节：
+
+- 参考图：用自身 `sqrt(h*w)` 建 h/w 网格，`t` 钉在当前 `t_cursor`。
+- 参考视频：音频钉在该参考自己的 w-grid 两端；视频帧用 `_video_t_grid(origin=t_cursor)`。
+- Target 音视频的时间原点接在所有 ref blocks 之后的 `t_cursor`。
+- `img_pos = [所有 ref visual 行号] + [target video 行号]`  
+  `audio_pos = [所有 ref audio 行号] + [target audio 行号]`  
+  `update_mask` / `audio_update_mask` 前缀 False（pin），后缀 True（可更新）。
+
+与 FL2VA 布局对比：
+
+| | FL2VA / T2VA | Ref2VA |
+| --- | --- | --- |
+| 条件区 | 固定 `imgvid_cond` 槽（0/1/2 帧） | 变长 ref blocks 交织音画 |
+| 条件几何 | 与 target canvas 同网格 | 每块可用自身网格 |
+| 音频条件 | 通常无（除非额外 ref audio 路径） | 可多段，且可与 video 绑定 |
+| 首末帧锚点 | RoPE `t` 钉到首帧或末帧语义位置 | 无 keyframe 语义；参考是 style/identity |
+
+官方上限（模型卡，服务侧按 profile 校验）：图像 ≤9、视频 ≤3（各 2–15s，总长 ≤15s）、音频 ≤3（须伴随图像/视频，不能单独输入）、全类型文件总数 ≤12。
+
+### 2.10 Decode：从 target 行回到 MP4
+
+Denoise 结束后只发布 **target 切片**：
+
+```text
+video_rows[target] [V,96]
+  → unpatchify [1,2,2] → latent [1,24,T,H,W]
+  → reverse normalize (×std + mean)
+  → VisualVAE tiled decode (fp16 autocast)
+  → crop 回 target canvas（VAE tile pad 在右/下）
+  → H.264 @ 24fps
+
+audio_rows[target] [A,32]
+  → unpack channel-major → [2,32,T]
+  → reverse normalize
+  → AudioVAE decode → waveform [2,1,L]
+  → permute 为输出 [1,2,L]
+  → AAC stereo @ 32kHz
+```
+
+Decode 与 encode 的不对称点：
+
+- 视觉 encode 用 **sampled posterior + seed 42**；decode 走确定性 tiled 路径。
+- 音频 encode 强制确定性后端；decode 不复用该 determinism 作用域。
+- 拒绝 `spatial` / `spatial_shard` VAE parallel decode，以遵守发布质量契约。
+
 ---
 
 ## 3. 创新点
@@ -398,13 +573,15 @@ Pipeline stages（严格顺序）：
 
 服务形态：**仅 monolithic**（`supports_disaggregation=False`）。对外暴露异步 OpenAI-compatible `/v1/videos`。
 
-Stage 之间不共享 Diffusers 式 `prompt_embeds + latents` 单一接口，而是通过 `batch.extra` 的 H3 专用键传递契约对象；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.6。
+Stage 之间不共享 Diffusers 式 `prompt_embeds + latents` 单一接口，而是通过 `batch.extra` 的 H3 专用键传递契约对象；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.10。
 
 TextEncoding 额外职责：
 
-- 用 H3 `processor` + 仓库 tokenizer 构造 presentation（含 `<Picture n>` / `<Video n>` / `<Audio n>` 材料标签与特殊 token）。
+- 用 H3 `processor` + 仓库 tokenizer 构造 presentation（含 `<Picture n>` / `<Video n>` / `<Audio n>` 材料标签与特殊 token）；详见 §2.8。
 - 只取 Qwen3-VL 第 50 层 hidden states；多输出请求可对相同 fingerprint 去重，encoder DP 时按 presentation 分发整请求而非 stack batch。
 - 产出的 `text_token_tags` 在 denoise 组装时覆盖 packed `token_tags` 的 text 区间（允许 FL2VA 视觉 span 覆盖默认 TEXT tag）。
+
+Visual/Audio Encoding 与 Ref2VA 排序契约见 §2.7、§2.9；decode 回包装见 §2.10。
 
 ### 4.2 请求契约
 
