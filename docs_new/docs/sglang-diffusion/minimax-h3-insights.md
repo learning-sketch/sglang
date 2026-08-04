@@ -30,21 +30,28 @@ MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成
 
 ### 0.2 你会碰到的词（术语表）
 
-| 词 | 人话 |
+命名约定：概念/分区名用大写（`FL2VA` / `Ref2VA`）；CLI 与 JSON 配置值用小写（`--model-variant fl2va`、`task: "ref2va"`）。
+
+| 词 | 一句话说明 |
 | --- | --- |
-| **DiT** | 生成主干网络。像“画家大脑”，一步步把噪声画成视频/音频。 |
-| **VAE** | 压缩/解压器。先把图像声音压成更小的 **latent**，生成后再解压回像素和波形。 |
-| **latent** | 压缩后的中间表示。模型主要在 latent 上算，不直接在原始像素上硬算。 |
-| **packed sequence** | 把文字、条件、音频、待生成视频排成 **一长串 token 行**，让同一个 DiT 一起看。 |
-| **AdaLN** | 按“这是文字/视频/音频行 + 当前时间步”调节每一层怎么处理该行。 |
-| **CFG / CFG 蒸馏** | 常见生成模型会跑正负两路提示；H3 发布权重已蒸馏成 **只跑一路**，所以不能开 CFG 并行。 |
-| **flow shift** | 控制“去噪日程”偏快还是偏慢；H3 里视频、音频各有一个（`flow_shift` / `audio_flow_shift`）。 |
-| **FL2VA** | 权重分区名：服务文字生成，以及首帧/末帧定格动画。启动用 `--model-variant fl2va`。 |
-| **Ref2VA** | 权重分区名：服务参考图/视频/音频，以及视频改创（V2V）。启动用 `--model-variant ref2va`。 |
-| **t2va / fl2va / ref2va** | 请求里的 `task` 字段：纯文生、首末帧生、参考生。 |
-| **Ulysses** | 一种多卡并行：把很长的 packed 序列切开到多张 GPU 上算注意力。 |
-| **TP（张量并行）** | 另一种多卡并行：把同一层权重切到多卡。可与 Ulysses 组合。 |
-| **quality** | 请求里的采样档位（lossless/high/medium/low）。影响生成轨迹，不是单纯压文件。 |
+| **DiT** | 生成主干网络：一步步把噪声变成视频/音频 latent。 |
+| **VAE** | 压缩/解压器：把图像或声音压成 **latent**，生成后再解回像素和波形。 |
+| **latent** | 压缩后的中间表示；模型主要在此空间计算，而非原始像素。 |
+| **packed sequence** | 把文字、条件、音频、待生成视频排成一长串 token 行，供同一个 DiT 联合处理。 |
+| **`imgvid_cond`** | packed 序列里的视觉条件行（首末帧或参考视觉），代码标识统一写作 `imgvid_cond`。 |
+| **AdaLN** | 按“行模态（文字/视频/音频）+ 当前时间步”调节每一层对该行的处理。 |
+| **CFG / CFG 蒸馏** | 常见生成会跑正负两路提示；H3 发布权重已蒸馏成只跑一路，因此不能开 CFG 并行。 |
+| **flow shift** | 控制去噪日程偏快或偏慢；H3 里视频、音频各有一个（`flow_shift` / `audio_flow_shift`）。 |
+| **FL2VA** | 权重分区名：服务文字生成与首/末帧定格动画。启动写 `--model-variant fl2va`。 |
+| **Ref2VA** | 权重分区名：服务参考图/视频/音频与视频改创（V2V）。启动写 `--model-variant ref2va`。 |
+| **t2va / fl2va / ref2va** | 请求里的 `task` 字段：纯文生、首末帧生、参考生（配置值一律小写）。 |
+| **Ulysses** | 序列并行：把很长的 packed 序列切到多张 GPU 上算注意力。 |
+| **TP（张量并行）** | 把同一层权重切到多卡；可与 Ulysses 组合。 |
+| **DP（数据并行）** | 多副本并行处理不同请求；H3 的 encoder DP 要求 TP=1 且 DiT DP=1。 |
+| **BCG** | Breakable CUDA Graph：可在动态点打断的 CUDA Graph 捕获/回放。 |
+| **RDT** | Residual-Difference Threshold：Cache-DiT 用残差差异阈值决定能否跳过后续 block。 |
+| **Cache-DiT** | 近似加速：在满足阈值时跳过部分 DiT block 计算，换取更低延迟。 |
+| **quality** | 请求采样档位（lossless/high/medium/low）；影响生成轨迹，不是单纯压文件。 |
 | **output_quality** | 只影响最终文件压缩，不改变模型怎么生成。 |
 
 ### 0.3 任务怎么选（决策树）
@@ -236,14 +243,14 @@ H3-Regenerate-2K ── 以 in-context 方式把 768p 结果再生到 2K（尚�
 
 SGLang Diffusion 当前原生支持的是 **H3-Base** 的两个任务分区权重：
 
-| Checkpoint / `--model-variant` | 公开 task | 条件输入 |
-| --- | --- | --- |
-| `FL2VA` / `fl2va` | `t2va`、`fl2va` | 纯文本；或首帧 / 末帧 / 首末帧 |
-| `Ref2VA` / `ref2va` | `ref2va`（含 V2V） | 图像 / 视频 / 音频参考（可组合） |
+| Checkpoint 子目录（概念名） | `--model-variant`（配置值） | 公开 `task` | 条件输入 |
+| --- | --- | --- | --- |
+| `FL2VA` | `fl2va` | `t2va`、`fl2va` | 纯文本；或首帧 / 末帧 / 首末帧 |
+| `Ref2VA` | `ref2va` | `ref2va`（含 V2V） | 图像 / 视频 / 音频参考（可组合） |
 
 要点：
 
-- **V2V 不是独立 task**，而是 `ref2va` + video reference。
+- **V2V 不是独立 task**，而是 `task=ref2va` + video reference。
 - `--model-path` 指向仓库根 ID，由 SGLang 按 `--model-variant` 映射到 `FL2VA` / `Ref2VA` 子目录；不要手动指到子目录。
 - 发布权重是 **CFG-distilled**：只有一条 positive denoise branch，因此 **不支持 CFG parallel**。
 - 与 §0.4 对照阅读：下面从 §2 开始进入实现细节。
@@ -254,22 +261,23 @@ SGLang Diffusion 当前原生支持的是 **H3-Base** 的两个任务分区权�
 
 ### 2.1 端到端数据流
 
-```text
-Text / Image / Video / Audio conditions
-        │
-        ├─ H3-Encoder (Qwen3-VL-32B, hidden_states[50]) ──► text tokens
-        ├─ H3-VisualVAE (f16t4d24) ──► video / keyframe / ref latents
-        └─ H3-AudioVAE (32ch, 40 Hz/ch) ──► audio latents
-        │
-        ▼
- Packed multimodal sequence
-   [ text | imgvid_cond | audio | video_target | pad ]
-        │
-        ▼
- H3-Omni-Transformer (≈33B dense DiT, MM-RoPE, modality AdaLN)
-        │
-        ├─ video latents ──► VisualVAE decode ──► H.264 @ 24fps
-        └─ audio latents ──► AudioVAE decode ──► AAC stereo @ 32kHz
+```mermaid
+flowchart TB
+  inputs["Text / Image / Video / Audio conditions"]
+  enc["H3-Encoder<br/>Qwen3-VL-32B · hidden_states[50]"]
+  vvae["H3-VisualVAE<br/>f16t4d24"]
+  avae["H3-AudioVAE<br/>32ch · 40 Hz/ch"]
+  pack["Packed multimodal sequence<br/>text · imgvid_cond · audio · video_target · pad"]
+  dit["H3-Omni-Transformer<br/>≈33B DiT · MM-RoPE · modality AdaLN"]
+  vout["VisualVAE decode → H.264 @ 24fps"]
+  aout["AudioVAE decode → AAC stereo @ 32kHz"]
+
+  inputs --> enc --> pack
+  inputs --> vvae --> pack
+  inputs --> avae --> pack
+  pack --> dit
+  dit --> vout
+  dit --> aout
 ```
 
 ### 2.2 组件规格（与 SGLang 配置对齐）
@@ -309,7 +317,7 @@ Text / Image / Video / Audio conditions
 
 | 项 | 值 |
 | --- | --- |
-| 参数量 | ≈33B dense；其中约 13B 位于 AdaLN 相关分支 |
+| 参数量 | ≈33B dense；其中约 13B 位于 AdaLN 相关分支（[官方模型卡](https://huggingface.co/MiniMaxAI/MiniMax-H3)原文，约 40%；因 AdaLN 输出可预计算/缓存，纯推理部署可不加载这部分） |
 | layers | 50 |
 | hidden size | 5376 |
 | attention heads | 56 × head_dim 128 |
@@ -363,32 +371,25 @@ FL2VA keyframe 签名仅允许：`[0]`、`[-1]`、`[0, -1]`。
 
 H3 的原生 pipeline 不是“encoder 直接喂 DiT”，而是 **先把多模态材料编码成行向量契约，再在 denoise stage 里组装 packed 输入**。各 stage 的职责与数据键如下。
 
-```text
-请求 (task/conditions/target/seed)
-        │
-        ▼
-PartitionAdmission ── 校验 task ↔ FL2VA/Ref2VA 分区
-        │
-        ├─ TextEncoding ──► extra[minimax_h3_text_embeddings]
-        │                    {positive: {hidden_states[L,5120], text_len, text_token_tags}}
-        │
-        ├─ VisualEncoding ──► keyframe_cond_rows / reference_image_rows / reference_video_rows
-        │                      (patch 后的视觉 latent 行, 宽 96 = 24×1×2×2)
-        │
-        ├─ AudioEncoding ──► reference_audio_rows
-        │                     (channel-major audio latent 行, 宽 32)
-        │
-        ├─ LatentPreparation ──► initial_video_rows [V,96], initial_audio_rows [A,32]
-        │                         (独立 RNG：同 seed 分别 seed 视频/音频 generator)
-        │
-        ├─ TimestepPreparation ──► sigmas.video / sigmas.audio
-        │                           (flow_shift / audio_flow_shift 各自 time-shift)
-        │
-        ▼
-Denoising ── 组装 packed layout + DiT forward + Euler η=0 更新 target 行
-        │
-        ▼
-Decoding ── unpatchify video / unpack audio → VisualVAE + AudioVAE → MP4
+```mermaid
+flowchart TB
+  req["请求<br/>task / conditions / target / seed"]
+  admit["PartitionAdmission<br/>校验 task ↔ FL2VA/Ref2VA"]
+  text["TextEncoding<br/>minimax_h3_text_embeddings<br/>hidden_states[L,5120]"]
+  visual["VisualEncoding<br/>keyframe / reference image·video rows<br/>宽 96"]
+  audio["AudioEncoding<br/>reference_audio_rows<br/>宽 32"]
+  latent["LatentPreparation<br/>initial_video_rows / initial_audio_rows"]
+  time["TimestepPreparation<br/>sigmas.video / sigmas.audio"]
+  denoise["Denoising<br/>packed layout + DiT + Euler η=0"]
+  decode["Decoding<br/>unpatchify / unpack → MP4"]
+
+  req --> admit
+  admit --> text --> denoise
+  admit --> visual --> denoise
+  admit --> audio --> denoise
+  admit --> latent --> denoise
+  admit --> time --> denoise
+  denoise --> decode
 ```
 
 功能关联可以概括成四条边：
@@ -437,37 +438,39 @@ DiT forward 的入口不是 `[B,C,T,H,W]` 张量，而是 **packed keyword contr
 
 有条件时，target 噪声被 scatter 进“全 image/audio 行”缓冲：`update_mask==True` 的位置放噪声，前面 cond/ref 槽留给锚点行。
 
-#### 组装步骤 B：`_embed`（DiT 内，每步或 BCG break 点）
+#### 组装步骤 B：`_embed`（DiT 内，每步或 BCG / Breakable CUDA Graph break 点）
 
-`MiniMaxH3DiTModel._embed` 在 **当前 Ulysses rank 的行分片** `[row_start, row_stop)` 上构造：
+`MiniMaxH3DiTModel._embed` 在 **当前 Ulysses rank 的行分片** `[row_start, row_stop)` 上构造 `decoder_input [S_local, 5376] bf16` 与 `t_emb [M, time_embed_dim] fp32`。
 
-```text
-decoder_input [S_local, 5376] bf16
-t_emb         [M, time_embed_dim] fp32   ← TimeEmbedder(unique_timesteps)
+```mermaid
+flowchart LR
+  subgraph sources [行来源]
+    pe["prompt_embeds<br/>[L,5120]"]
+    x["x video rows<br/>[*,96]"]
+    ax["audio_x rows<br/>[*,32]"]
+    ts["unique_timesteps"]
+  end
+
+  subgraph embed ["_embed 写入 local shard"]
+    refine["condition_proj + token_refiner"]
+    vproj["video_patch_proj fp32"]
+    aproj["audio_patch_proj fp32"]
+    temb["TimeEmbedder"]
+    out["decoder_input [S_local,5376]<br/>+ t_emb"]
+  end
+
+  pe --> refine --> out
+  x --> vproj --> out
+  ax --> aproj --> out
+  ts --> temb --> out
 ```
 
 写入规则：
 
-```text
-1) Text
-   prompt_embeds[L,5120]
-     → (若未预计算) condition_proj → token_refiner(2 blocks)
-     → text_embed[L,5376]
-     → 按 text_pos ∩ local shard 写入（serving 用 index_copy 连续前缀）
-
-2) Video
-   x 中本 rank 拥有的 img_global_ids 行
-     → video_patch_proj (fp32 Linear: 96 → 5376, gather_output)
-     → cast bf16 写入 img_row_ids
-
-3) Audio
-   audio_x 中本 rank 拥有的 audio_global_ids 行
-     → audio_patch_proj (fp32 Linear: 32 → 5376)
-     → cast bf16 写入 audio_row_ids
-
-4) Padding / 未覆盖行
-   trusted layout 下先 empty 再对 live 后缀 zero；direct caller 用 zeros + index_add
-```
+1. **Text**：`prompt_embeds` →（若未预计算）`condition_proj` → `token_refiner`（2 blocks）→ 按 `text_pos ∩ local shard` 写入（serving 用 `index_copy` 连续前缀）。
+2. **Video**：本 rank 的 `img_global_ids` → `video_patch_proj`（96→5376, fp32）→ cast bf16 写入 `img_row_ids`。
+3. **Audio**：本 rank 的 `audio_global_ids` → `audio_patch_proj`（32→5376, fp32）→ cast bf16 写入 `audio_row_ids`。
+4. **Padding / 未覆盖行**：trusted layout 下先 `empty` 再对 live 后缀 zero；direct caller 用 `zeros` + `index_add`。
 
 要点：
 
@@ -517,7 +520,7 @@ step k:
 | 行类型 | 谁写入初值 | 每步是否进 Attention | 是否 Euler 更新 |
 | --- | --- | --- | --- |
 | text | TextEncoder → refine → `_embed` | 是 | 否（无 latent 状态） |
-| imgvid cond / visual ref | VisualVAE (+ optional noise aug) | 是 | 否（pin） |
+| `imgvid_cond` / visual ref | VisualVAE (+ optional noise aug) | 是 | 否（pin） |
 | audio ref | AudioVAE (+ optional noise aug) | 是 | 否（pin） |
 | video target | LatentPreparation 噪声 | 是 | 是 |
 | audio target | LatentPreparation 噪声 | 是 | 是 |
@@ -717,7 +720,7 @@ Decode 与 encode 的不对称点：
 主干 Attention/FFN 共享，模态差异下沉到 AdaLN 与 I/O。带来：
 
 - 更好的跨模态泛化与扩展；
-- AdaLN 输出可预计算/缓存时，推理部署可降低有效加载压力（官方说明约 13B AdaLN 参数可在纯推理场景优化）；
+- AdaLN 输出可预计算/缓存时，推理部署可降低有效加载压力（[官方模型卡](https://huggingface.co/MiniMaxAI/MiniMax-H3)称约 13B 参数位于 AdaLN 相关分支，纯推理可不加载）；
 - 训练/推理增量成本相对可控。
 
 ### 3.4 MM-RoPE + Packed Multimodal Sequence
@@ -777,7 +780,7 @@ Stage 之间不共享 Diffusers 式 `prompt_embeds + latents` 单一接口，而
 TextEncoding 额外职责：
 
 - 用 H3 `processor` + 仓库 tokenizer 构造 presentation（含 `<Picture n>` / `<Video n>` / `<Audio n>` 材料标签与特殊 token）；详见 §2.8。
-- 只取 Qwen3-VL 第 50 层 hidden states；多输出请求可对相同 fingerprint 去重，encoder DP 时按 presentation 分发整请求而非 stack batch。
+- 只取 Qwen3-VL 第 50 层 hidden states；多输出请求可对相同 fingerprint 去重，encoder DP（Data Parallel，多副本分发不同请求）时按 presentation 分发整请求而非 stack batch。
 - 产出的 `text_token_tags` 在 denoise 组装时覆盖 packed `token_tags` 的 text 区间（允许 FL2VA 视觉 span 覆盖默认 TEXT tag）。
 
 Visual/Audio Encoding 与 Ref2VA 排序契约见 §2.7、§2.9；decode 回包装见 §2.10。
@@ -837,9 +840,9 @@ Visual/Audio Encoding 与 Ref2VA 排序契约见 §2.7、§2.9；decode 回包�
 | Ring SP | **主线实现拒绝**（packed multi-segment 不兼容）；社区后续有跨节点 Ulysses×Ring 探索 PR |
 | FSDP inference | 仅 shard DiT；保留 mixed BF16/FP32 all-gather |
 | CFG parallel | 拒绝（蒸馏单分支） |
-| Encoder parallel | `auto` 可在单机高带宽拓扑上 fold Qwen encoder 到空闲 Ulysses ranks；吞吐场景可用 DP（要求 TP1/DiT DP1） |
+| Encoder parallel | `auto` 可在单机高带宽拓扑上 fold Qwen encoder 到空闲 Ulysses ranks；吞吐场景可用 DP / Data Parallel（要求 TP1/DiT DP1） |
 | Layerwise offload | 验证于 2×RTX 5090：20 DiT blocks resident；encoder/VAE decoder 一层 prefetch；video VAE encoder 与小体积 audio VAE 保持 resident |
-| Breakable CUDA Graph | 可选；需匹配 warmup resolution 与 `bcg-text-buckets` |
+| BCG（Breakable CUDA Graph） | 可选；需匹配 warmup resolution 与 `bcg-text-buckets` |
 | Online FP8 | B200/B300 验证路径；自动忽略必须保持 fp32 的 patch/time/final 层 |
 
 验证过的推荐拓扑示例：
@@ -868,16 +871,18 @@ Visual/Audio Encoding 与 Ref2VA 排序契约见 §2.7、§2.9；decode 回包�
 - Scheduler：`MiniMaxH3EulerAncestralEta0`（η=0 的 Euler 步进）。
 - Video / audio 使用 **独立 sigma 日程**；`model_index` 可携带 `sigma_shift_scales`。
 - Denoise loop 维护 packed rows、update masks、local embedding layout（Ulysses 分片时）。
-- `quality` 请求字段挂载审计过的 Cache-DiT profile（仅严格 4×H200 T2VA 工作负载 fail-closed）：
+- `quality` 请求字段挂载审计过的 Cache-DiT profile（仅严格 4×H200 T2VA 工作负载 fail-closed）。表中 **RDT** = Residual-Difference Threshold（残差差异阈值）。
 
-| quality | warmup | RDT | max consecutive cache | 相对 lossless 延迟（4×H200 测量） |
+测量条件（与 cookbook 一致）：`batch_size=1`、单请求、`task=t2va`、分辨率 **1344×768**、时长约 **5.17 s / 124 帧 @ 24 fps**、`num_inference_steps=50`、`flow_shift=12.0`、`audio_flow_shift=3.0`、拓扑 **4×H200 · Ulysses4 · eager BF16/FP32**；延迟为三组固定 prompt/seed 的平均 `inference_time_s`。
+
+| quality | warmup | RDT | max consecutive cache | 相对 lossless 延迟 |
 | --- | ---: | ---: | ---: | ---: |
 | lossless | — | — | — | 75.10 s（1.00×） |
 | high | 4 | 0.04 | 1 | 53.70 s（1.40×） |
 | medium | 4 | 0.12 | 3 | 30.23 s（2.48×） |
 | low | 4 | 0.24 | 3 | 25.81 s（2.91×） |
 
-Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG 优先时 Cache-DiT 保持关闭。
+Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG（Breakable CUDA Graph）优先时 Cache-DiT 保持关闭。
 
 ### 5.4 VAE 质量契约
 
@@ -910,7 +915,7 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG 优先时 Cache-DiT
 入门避坑先看 §0.7。这里给部署/评测向的浓缩建议：
 
 1. **先选对分区**：T2VA/FL2VA 用 `fl2va`；任何参考/V2V 用 `ref2va`。
-2. **一致性与压测分开**：GT / 对齐实验用 eager BF16/FP32 + lossless；延迟实验再开 Cache-DiT / FP8 / BCG。
+2. **一致性与压测分开**：GT / 对齐实验用 eager BF16/FP32 + lossless；延迟实验再开 Cache-DiT / FP8 / BCG（Breakable CUDA Graph）。
 3. **H100 优先 TP2+Ulysses2**；内存更紧时 TP4 或 FSDP，而不是假设 FSDP 更快。
 4. **不要开 CFG parallel / SageAttention / spatial VAE decode**——都会被显式拒绝或破坏契约。
 5. **Context-IR 与 2K regenerate 仍在产品侧**：本地 SGLang 路径对应 768p H3-Base；要复现官方 2K 端到端质量需结合官方 API / 自建 prompt 预处理。
@@ -919,9 +924,14 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG 优先时 Cache-DiT
 
 ## 7. 参考资料
 
-- 模型卡：<https://huggingface.co/MiniMaxAI/MiniMax-H3>
-- SGLang cookbook（交互式部署/请求模板）：`docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`
-- 主支持 PR：<https://github.com/sgl-project/sglang/pull/33275>
+- 模型卡
+  - Hugging Face：https://huggingface.co/MiniMaxAI/MiniMax-H3
+  - ModelScope：https://modelscope.cn/models/MiniMax/MiniMax-H3
+  - MiniMax 官网模型页：https://www.minimax.io
+  - 在线 API（全球）：https://platform.minimax.io/docs/api-reference/video-generation-v2-create
+  - 在线 App（Hailuo）：https://hailuoai.video
+- SGLang cookbook（交互式部署/请求模板）：上游仓库 `docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`（见 [PR #33275](https://github.com/sgl-project/sglang/pull/33275) 合入后的 main）
+- 主支持 PR：https://github.com/sgl-project/sglang/pull/33275
 - 核心实现入口：
   - `python/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py`
   - `python/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py`
