@@ -15,11 +15,16 @@
 
 ---
 
-## 0. 给小白的快速入门
+## 0. 面向初学者的快速入门
 
 ### 0.1 三十秒直觉
 
-MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成器**。输入可为文字，也可附带首尾帧、参考图、参考视频或参考音频；与常见的「先出无声视频再配乐」路线不同，它 **一次生成同步的画面 + 立体声**，输出 MP4（约 24 帧/秒画面，32 kHz 双声道声音）。SGLang 本地部署跑的是开源主干 **H3-Base**（默认约 768p 短边画质），未覆盖完整商业 App 流水线。
+MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成器**：
+
+1. 输入可为文字，也可附带首尾帧、参考图、参考视频或参考音频。
+2. 与常见的「先出无声视频再配乐」路线不同，它 **一次生成同步的画面 + 立体声**。
+3. 输出是一个 MP4：画面约 24 帧/秒，声音是 32 kHz 双声道。
+4. 用 SGLang 在本地部署时，跑的是开源主干 **H3-Base**（默认约 768p 短边画质），不是完整商业 App 的全部流水线。
 
 一句话：`文字/参考材料 → 服务器思考几十步 → 下载带声音的短视频`。
 
@@ -87,7 +92,7 @@ MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成
 | 典型分辨率 | 短边约 768p | 产品侧可到 2K 再生 |
 | Prompt 增强 | 需自行撰写或自建预处理 | Context-IR 可理解并补全复杂多模态指令 |
 | 怎么用 | `sglang serve` + `/v1/videos` | Hailuo App / MiniMax API |
-| 许可 | Community License，商用前自己审 | 以平台条款为准 |
+| 许可 | Community License，商用前须自行审核 | 以平台条款为准 |
 
 结论：本地跑通 ≠ 自动复现官网最强效果；缺的主要是 **Context-IR** 和 **2K regenerate**（二者目前未随 SGLang 开源权重完整提供）。
 
@@ -96,7 +101,7 @@ MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成
 前置：
 
 - 已安装：`uv pip install "sglang[diffusion]" --prerelease=allow`
-- 推荐硬件：认真体验用 **4×H100 或 4×H200**；2×RTX 5090 能跑但明显更慢；单卡消费级通常难以获得可用延迟。
+- 推荐硬件：完整跑通优先 **4×H100 或 4×H200**；2×RTX 5090 能跑但明显更慢；单卡消费级通常难以获得可用延迟。
 - Hugging Face 如需鉴权：准备好 `HF_TOKEN`。
 
 **1）启动服务（4×H100 示例）**
@@ -200,7 +205,7 @@ curl -sS -L "http://127.0.0.1:30010/v1/videos/${video_id}/content" \
 9. **时长/分辨率乱填**  
    时长 4–15 秒；质量对照常用短边 768、50 steps、`flow_shift=12`、`audio_flow_shift=3`。
 
-10. **`quality` 和 `output_quality` 搞混**  
+10. **`quality` 和 `output_quality` 混淆**  
     前者改生成过程，后者只改封装压缩。
 
 ---
@@ -364,7 +369,7 @@ FL2VA keyframe 签名仅允许：`[0]`、`[-1]`、`[0, -1]`。
 
 ### 2.4 模块功能关联：谁产出什么、谁消费什么
 
-H3 的原生 pipeline **先把多模态材料编码成行向量契约，再在 denoise stage 里组装 packed 输入**；各 stage 的职责与数据键如下。
+H3 的原生 pipeline 不是“encoder 直接喂 DiT”，而是 **先把多模态材料编码成行向量契约，再在 denoise stage 里组装 packed 输入**。各 stage 的职责与数据键如下。
 
 ```mermaid
 flowchart TB
@@ -390,10 +395,10 @@ flowchart TB
 功能关联可以概括成四条边：
 
 1. **语义边（Text → DiT）**  
-   Qwen3-VL 产出 `hidden_states[L,5120]`，经 `condition_proj`（5120→5376）与 `token_refiner`（2 层）得到 **refined text rows** 后 scatter 到 packed 序列的 text 槽位；`text_token_tags` 覆盖该区间，供 AdaLN modality 选择。
+   Qwen3-VL 产出 `hidden_states[L,5120]`。它们不直接进 50 层 DiT block，而是先经 `condition_proj`（5120→5376）+ `token_refiner`（2 层）变成 **refined text rows**，再 scatter 到 packed 序列的 text 槽位。`text_token_tags` 覆盖 packed 的 text 区间，用于 AdaLN modality 选择。
 
 2. **条件边（VAE → packed cond/ref rows）**  
-   Visual/Audio VAE 只编码 **条件材料**（首末帧、参考图/视频/音频）。这些行在 denoise 中被 pin 住——每步写入 buffer 但不做 Euler 更新——由 target 行接收初始噪声并逐步更新。
+   Visual/Audio VAE 只编码 **条件材料**（首末帧、参考图/视频/音频），不编码将要生成的 target。这些行在 denoise 中被 pin 住：每步重写到 buffer，但不做 Euler 更新。Target 行才接收初始噪声并逐步更新。
 
 3. **几何边（canvas/shape → packed indices）**  
    Pre-queue 的 `resolved_v2` shape 决定 `latent_t/h/w`、`audio_t`。`packed_sequence` 据此生成 `text_pos / img_pos / audio_pos / update_mask / img_position_ids / cu_seqlens`。没有这份几何，`_embed` 不知道把哪段 latent 写到哪一行。
@@ -403,7 +408,7 @@ flowchart TB
 
 ### 2.5 DiT 输入如何组装：从行向量到 `_embed`
 
-服务热路径（`MiniMaxH3DenoiseBranch.forward_kwargs`）按 **packed keyword contract** 逐步组装输入：
+DiT forward 的入口不是 `[B,C,T,H,W]` 张量，而是 **packed keyword contract**。服务热路径（`MiniMaxH3DenoiseBranch.forward_kwargs`）每步组装：
 
 | kwarg | 来源 | 作用 |
 | --- | --- | --- |
@@ -417,7 +422,7 @@ flowchart TB
 | `*_pos_info` | packed 位置 | text/img/audio/infer-output 行号 |
 | `local_embedding_layout` | Ulysses 局部布局 | 避免每步 `nonzero` 扫描 |
 | `packed_seq_params` / `refiner_packed_seq_params` | cu_seqlens | varlen attention / refiner 窗口 |
-| `update_mask` | packed | 选出可更新的视频 target 行（服务路径常 `skip_mask_out_condition=True`，由 loop 自己只更新 target slice） |
+| `update_mask` | packed | 选出可更新的视频 target 行（服务路径常 `skip_mask_out_condition=True`，由 loop 仅更新 target slice） |
 
 #### 组装步骤 A：模态行准备（DiT 之外）
 
@@ -467,7 +472,12 @@ flowchart LR
 3. **Audio**：本 rank 的 `audio_global_ids` → `audio_patch_proj`（32→5376, fp32）→ cast bf16 写入 `audio_row_ids`。
 4. **Padding / 未覆盖行**：trusted layout 下先 `empty` 再对 live 后缀 zero；direct caller 用 `zeros` + `index_add`。
 
-要点：patch/time/final 投影保持 fp32，写入 bf16 序列时再 cast。Text refine 与 RoPE cache 均为请求静态——denoise stage 各预计算一次（`refine_prompt_embeds`、按 Ulysses 局部行缓存 `cos/sin`）；Ulysses 只在 Attention 内做 sequence↔heads all-to-all，`_embed` / MLP / FinalLayer 保持 **row-local**。
+要点：
+
+- **patch/time/final 投影保持 fp32**，只在写入 bf16 序列时 cast。
+- Text refine 是请求静态的：denoise stage 会调用 `refine_prompt_embeds` 一次，后续步跳过 refiner。
+- RoPE cache 同样请求静态：按 Ulysses 局部行预计算 `cos/sin`。
+- Ulysses 只在 Attention 内做 sequence↔heads all-to-all；`_embed`、MLP、FinalLayer 都是 **row-local**。
 
 #### 组装步骤 C：block stack 与输出选择
 
@@ -604,7 +614,7 @@ presentation ids (+ pixel_values / image_grid_thw / video tensors)
        {hidden_states, text_len, text_token_tags}
 ```
 
-随后 denoise 用 `text_token_tags` **覆盖** packed 序列 text 区间的默认 tag，使 FL2VA/Ref2VA 里 vision span 在 AdaLN 上走 VIDEO modality。
+随后 denoise 把 `text_token_tags` **覆盖** packed 序列 text 区间的默认 tag，使 FL2VA/Ref2VA 里 vision span 在 AdaLN 上走 VIDEO modality，而不是 TEXT。
 
 ### 2.9 Ref2VA block 排序与 packed 布局
 
@@ -697,7 +707,7 @@ Decode 与 encode 的不对称点：
 
 ### 3.1 原生联合音视频生成（T2VA / FL2VA / Ref2VA）
 
-**同一 Transformer 联合预测 video/audio latents**，从训练与推理上保证时序与语义同步。输出契约固定为：H.264 24fps + AAC stereo 32kHz 单文件 MP4。
+与常见的「视频模型 + 后期配乐」不同，H3 用 **同一 Transformer 联合预测 video/audio latents**，从训练与推理上保证时序与语义同步。输出契约固定为：H.264 24fps + AAC stereo 32kHz 单文件 MP4。
 
 ### 3.2 任务泛化的双分区权重
 
@@ -728,13 +738,13 @@ Decode 与 encode 的不对称点：
 
 ### 3.7 In-context 2K 再生（产品侧，暂未开源）
 
-2K 路径把 768p 结果与原始 context 再喂回 H3 做 in-context regenerate，以保留小字与细节；当前仅 API 可验证。
+2K 没有走独立超分模块的路线；它把 768p 结果 + 原始 context 再喂回 H3 做 in-context regenerate，以保留小字与细节；当前仅 API 可验证。
 
 ---
 
 ## 4. SGLang 如何支持
 
-### 4.1 支持形态：原生 Pipeline
+### 4.1 支持形态：原生 Pipeline（相对 Diffusers 包装）
 
 上游以 **fully native joint video/audio pipeline** 接入 `sglang.multimodal_gen`：
 
@@ -765,7 +775,7 @@ Pipeline stages（严格顺序）：
 
 服务形态：**仅 monolithic**（`supports_disaggregation=False`）。对外暴露异步 OpenAI-compatible `/v1/videos`。
 
-Stage 之间通过 `batch.extra` 的 H3 专用键传递契约对象，不复用 Diffusers 式 `prompt_embeds + latents` 单一接口；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.10。
+Stage 之间不共享 Diffusers 式 `prompt_embeds + latents` 单一接口，而是通过 `batch.extra` 的 H3 专用键传递契约对象；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.10。
 
 TextEncoding 额外职责：
 
@@ -907,7 +917,7 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG（Breakable CUDA Gr
 1. **先选对分区**：T2VA/FL2VA 用 `fl2va`；任何参考/V2V 用 `ref2va`。
 2. **一致性与压测分开**：GT / 对齐实验用 eager BF16/FP32 + lossless；延迟实验再开 Cache-DiT / FP8 / BCG（Breakable CUDA Graph）。
 3. **H100 优先 TP2+Ulysses2**；内存更紧时用 TP4 或 FSDP，勿默认 FSDP 更快。
-4. **不要开 CFG parallel / SageAttention / spatial VAE decode**——都会被显式拒绝或破坏契约。
+4. **不要开 CFG parallel / SageAttention / spatial VAE decode**。它们都会被显式拒绝或破坏契约。
 5. **Context-IR 与 2K regenerate 仍在产品侧**：本地 SGLang 路径对应 768p H3-Base；要复现官方 2K 端到端质量需结合官方 API / 自建 prompt 预处理。
 
 ---
