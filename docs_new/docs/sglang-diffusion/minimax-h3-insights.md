@@ -19,16 +19,11 @@
 
 ### 0.1 三十秒直觉
 
-MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成器**：
-
-1. 你给它一段文字，也可以再给首尾帧、参考图、参考视频、参考音频。
-2. 它不是先出无声视频再配乐，而是 **一次生成同步的画面 + 立体声**。
-3. 你拿到的是一个 MP4：画面约 24 帧/秒，声音是 32 kHz 双声道。
-4. 用 SGLang 在本地部署时，跑的是开源主干 **H3-Base**（默认约 768p 短边画质），不是完整商业 App 的全部流水线。
+MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成器**。输入可为文字，也可附带首尾帧、参考图、参考视频或参考音频；与常见的「先出无声视频再配乐」路线不同，它 **一次生成同步的画面 + 立体声**，输出 MP4（约 24 帧/秒画面，32 kHz 双声道声音）。SGLang 本地部署跑的是开源主干 **H3-Base**（默认约 768p 短边画质），未覆盖完整商业 App 流水线。
 
 一句话：`文字/参考材料 → 服务器思考几十步 → 下载带声音的短视频`。
 
-### 0.2 你会碰到的词（术语表）
+### 0.2 常见术语
 
 命名约定：概念/分区名用大写（`FL2VA` / `Ref2VA`）；CLI 与 JSON 配置值用小写（`--model-variant fl2va`、`task: "ref2va"`）。
 
@@ -36,7 +31,7 @@ MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成
 | --- | --- |
 | **DiT** | 生成主干网络：一步步把噪声变成视频/音频 latent。 |
 | **VAE** | 压缩/解压器：把图像或声音压成 **latent**，生成后再解回像素和波形。 |
-| **latent** | 压缩后的中间表示；模型主要在此空间计算，而非原始像素。 |
+| **latent** | 压缩后的中间表示；模型主要在此空间计算。 |
 | **packed sequence** | 把文字、条件、音频、待生成视频排成一长串 token 行，供同一个 DiT 联合处理。 |
 | **`imgvid_cond`** | packed 序列里的视觉条件行（首末帧或参考视觉），代码标识统一写作 `imgvid_cond`。 |
 | **AdaLN** | 按“行模态（文字/视频/音频）+ 当前时间步”调节每一层对该行的处理。 |
@@ -90,7 +85,7 @@ MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成
 | --- | --- | --- |
 | 跑什么 | 开源 **H3-Base**（FL2VA / Ref2VA） | 常含 Context-IR 预处理 + Base +（可选）2K regenerate |
 | 典型分辨率 | 短边约 768p | 产品侧可到 2K 再生 |
-| Prompt 增强 | 需你自己写好 / 自建预处理 | Context-IR 可帮你理解和补全复杂多模态指令 |
+| Prompt 增强 | 需自行撰写或自建预处理 | Context-IR 可理解并补全复杂多模态指令 |
 | 怎么用 | `sglang serve` + `/v1/videos` | Hailuo App / MiniMax API |
 | 许可 | Community License，商用前自己审 | 以平台条款为准 |
 
@@ -101,7 +96,7 @@ MiniMax-H3 可以看成一台 **「同时拍电影画面和现场声」的生成
 前置：
 
 - 已安装：`uv pip install "sglang[diffusion]" --prerelease=allow`
-- 推荐硬件：认真体验用 **4×H100 或 4×H200**；2×RTX 5090 能跑但明显更慢；单卡消费级通常不够舒服。
+- 推荐硬件：认真体验用 **4×H100 或 4×H200**；2×RTX 5090 能跑但明显更慢；单卡消费级通常难以获得可用延迟。
 - Hugging Face 如需鉴权：准备好 `HF_TOKEN`。
 
 **1）启动服务（4×H100 示例）**
@@ -369,7 +364,7 @@ FL2VA keyframe 签名仅允许：`[0]`、`[-1]`、`[0, -1]`。
 
 ### 2.4 模块功能关联：谁产出什么、谁消费什么
 
-H3 的原生 pipeline 不是“encoder 直接喂 DiT”，而是 **先把多模态材料编码成行向量契约，再在 denoise stage 里组装 packed 输入**。各 stage 的职责与数据键如下。
+H3 的原生 pipeline **先把多模态材料编码成行向量契约，再在 denoise stage 里组装 packed 输入**；各 stage 的职责与数据键如下。
 
 ```mermaid
 flowchart TB
@@ -395,10 +390,10 @@ flowchart TB
 功能关联可以概括成四条边：
 
 1. **语义边（Text → DiT）**  
-   Qwen3-VL 产出 `hidden_states[L,5120]`。它们不直接进 50 层 DiT block，而是先经 `condition_proj`（5120→5376）+ `token_refiner`（2 层）变成 **refined text rows**，再 scatter 到 packed 序列的 text 槽位。`text_token_tags` 覆盖 packed 的 text 区间，用于 AdaLN modality 选择。
+   Qwen3-VL 产出 `hidden_states[L,5120]`，经 `condition_proj`（5120→5376）与 `token_refiner`（2 层）得到 **refined text rows** 后 scatter 到 packed 序列的 text 槽位；`text_token_tags` 覆盖该区间，供 AdaLN modality 选择。
 
 2. **条件边（VAE → packed cond/ref rows）**  
-   Visual/Audio VAE 只编码 **条件材料**（首末帧、参考图/视频/音频），不编码将要生成的 target。这些行在 denoise 中被 pin 住：每步重写到 buffer，但不做 Euler 更新。Target 行才吃初始噪声并逐步更新。
+   Visual/Audio VAE 只编码 **条件材料**（首末帧、参考图/视频/音频）。这些行在 denoise 中被 pin 住——每步写入 buffer 但不做 Euler 更新——由 target 行接收初始噪声并逐步更新。
 
 3. **几何边（canvas/shape → packed indices）**  
    Pre-queue 的 `resolved_v2` shape 决定 `latent_t/h/w`、`audio_t`。`packed_sequence` 据此生成 `text_pos / img_pos / audio_pos / update_mask / img_position_ids / cu_seqlens`。没有这份几何，`_embed` 不知道把哪段 latent 写到哪一行。
@@ -408,7 +403,7 @@ flowchart TB
 
 ### 2.5 DiT 输入如何组装：从行向量到 `_embed`
 
-DiT forward 的入口不是 `[B,C,T,H,W]` 张量，而是 **packed keyword contract**。服务热路径（`MiniMaxH3DenoiseBranch.forward_kwargs`）每步组装：
+服务热路径（`MiniMaxH3DenoiseBranch.forward_kwargs`）按 **packed keyword contract** 逐步组装输入：
 
 | kwarg | 来源 | 作用 |
 | --- | --- | --- |
@@ -472,12 +467,7 @@ flowchart LR
 3. **Audio**：本 rank 的 `audio_global_ids` → `audio_patch_proj`（32→5376, fp32）→ cast bf16 写入 `audio_row_ids`。
 4. **Padding / 未覆盖行**：trusted layout 下先 `empty` 再对 live 后缀 zero；direct caller 用 `zeros` + `index_add`。
 
-要点：
-
-- **patch/time/final 投影保持 fp32**，只在写入 bf16 序列时 cast。
-- Text refine 是请求静态的：denoise stage 会调用 `refine_prompt_embeds` 一次，后续步跳过 refiner。
-- RoPE cache 同样请求静态：按 Ulysses 局部行预计算 `cos/sin`。
-- Ulysses 只在 Attention 内做 sequence↔heads all-to-all；`_embed`、MLP、FinalLayer 都是 **row-local**。
+要点：patch/time/final 投影保持 fp32，写入 bf16 序列时再 cast。Text refine 与 RoPE cache 均为请求静态——denoise stage 各预计算一次（`refine_prompt_embeds`、按 Ulysses 局部行缓存 `cos/sin`）；Ulysses 只在 Attention 内做 sequence↔heads all-to-all，`_embed` / MLP / FinalLayer 保持 **row-local**。
 
 #### 组装步骤 C：block stack 与输出选择
 
@@ -614,7 +604,7 @@ presentation ids (+ pixel_values / image_grid_thw / video tensors)
        {hidden_states, text_len, text_token_tags}
 ```
 
-随后 denoise 把 `text_token_tags` **覆盖** packed 序列 text 区间的默认 tag，使 FL2VA/Ref2VA 里 vision span 在 AdaLN 上走 VIDEO modality，而不是 TEXT。
+随后 denoise 用 `text_token_tags` **覆盖** packed 序列 text 区间的默认 tag，使 FL2VA/Ref2VA 里 vision span 在 AdaLN 上走 VIDEO modality。
 
 ### 2.9 Ref2VA block 排序与 packed 布局
 
@@ -707,7 +697,7 @@ Decode 与 encode 的不对称点：
 
 ### 3.1 原生联合音视频生成（T2VA / FL2VA / Ref2VA）
 
-不是“视频模型 + 后期配乐”，而是 **同一 Transformer 联合预测 video/audio latents**，从训练与推理上保证时序与语义同步。输出契约固定为：H.264 24fps + AAC stereo 32kHz 单文件 MP4。
+**同一 Transformer 联合预测 video/audio latents**，从训练与推理上保证时序与语义同步。输出契约固定为：H.264 24fps + AAC stereo 32kHz 单文件 MP4。
 
 ### 3.2 任务泛化的双分区权重
 
@@ -738,13 +728,13 @@ Decode 与 encode 的不对称点：
 
 ### 3.7 In-context 2K 再生（产品侧，暂未开源）
 
-2K 不是独立超分模块，而是把 768p 结果 + 原始 context 再喂回 H3 做 in-context regenerate，以保留小字与细节；当前仅 API 可验证。
+2K 路径把 768p 结果与原始 context 再喂回 H3 做 in-context regenerate，以保留小字与细节；当前仅 API 可验证。
 
 ---
 
 ## 4. SGLang 如何支持
 
-### 4.1 支持形态：原生 Pipeline，而非 Diffusers 包装
+### 4.1 支持形态：原生 Pipeline
 
 上游以 **fully native joint video/audio pipeline** 接入 `sglang.multimodal_gen`：
 
@@ -775,12 +765,12 @@ Pipeline stages（严格顺序）：
 
 服务形态：**仅 monolithic**（`supports_disaggregation=False`）。对外暴露异步 OpenAI-compatible `/v1/videos`。
 
-Stage 之间不共享 Diffusers 式 `prompt_embeds + latents` 单一接口，而是通过 `batch.extra` 的 H3 专用键传递契约对象；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.10。
+Stage 之间通过 `batch.extra` 的 H3 专用键传递契约对象，不复用 Diffusers 式 `prompt_embeds + latents` 单一接口；Denoising 是唯一把各模态行 **scatter 进 packed buffer 并调用 DiT** 的汇合点。详见 §2.4–§2.10。
 
 TextEncoding 额外职责：
 
 - 用 H3 `processor` + 仓库 tokenizer 构造 presentation（含 `<Picture n>` / `<Video n>` / `<Audio n>` 材料标签与特殊 token）；详见 §2.8。
-- 只取 Qwen3-VL 第 50 层 hidden states；多输出请求可对相同 fingerprint 去重，encoder DP（Data Parallel，多副本分发不同请求）时按 presentation 分发整请求而非 stack batch。
+- 只取 Qwen3-VL 第 50 层 hidden states；多输出请求可对相同 fingerprint 去重，encoder DP（Data Parallel，多副本分发不同请求）时按 presentation 分发整请求，避免 stack batch。
 - 产出的 `text_token_tags` 在 denoise 组装时覆盖 packed `token_tags` 的 text 区间（允许 FL2VA 视觉 span 覆盖默认 TEXT tag）。
 
 Visual/Audio Encoding 与 Ref2VA 排序契约见 §2.7、§2.9；decode 回包装见 §2.10。
@@ -916,7 +906,7 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG（Breakable CUDA Gr
 
 1. **先选对分区**：T2VA/FL2VA 用 `fl2va`；任何参考/V2V 用 `ref2va`。
 2. **一致性与压测分开**：GT / 对齐实验用 eager BF16/FP32 + lossless；延迟实验再开 Cache-DiT / FP8 / BCG（Breakable CUDA Graph）。
-3. **H100 优先 TP2+Ulysses2**；内存更紧时 TP4 或 FSDP，而不是假设 FSDP 更快。
+3. **H100 优先 TP2+Ulysses2**；内存更紧时用 TP4 或 FSDP，勿默认 FSDP 更快。
 4. **不要开 CFG parallel / SageAttention / spatial VAE decode**——都会被显式拒绝或破坏契约。
 5. **Context-IR 与 2K regenerate 仍在产品侧**：本地 SGLang 路径对应 768p H3-Base；要复现官方 2K 端到端质量需结合官方 API / 自建 prompt 预处理。
 
@@ -924,15 +914,15 @@ Cache-DiT **不可**与 FSDP / DiT layerwise 同时开；BCG（Breakable CUDA Gr
 
 ## 7. 参考资料
 
-- 模型卡
-  - Hugging Face：https://huggingface.co/MiniMaxAI/MiniMax-H3
-  - ModelScope：https://modelscope.cn/models/MiniMax/MiniMax-H3
-  - MiniMax 官网模型页：https://www.minimax.io
-  - 在线 API（全球）：https://platform.minimax.io/docs/api-reference/video-generation-v2-create
-  - 在线 App（Hailuo）：https://hailuoai.video
-- SGLang cookbook（交互式部署/请求模板）：上游仓库 `docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`（见 [PR #33275](https://github.com/sgl-project/sglang/pull/33275) 合入后的 main）
-- 主支持 PR：https://github.com/sgl-project/sglang/pull/33275
-- 核心实现入口：
-  - `python/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py`
-  - `python/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py`
-  - `python/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3/`
+- 模型卡与产品入口
+  - Hugging Face：[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
+  - ModelScope：[MiniMax/MiniMax-H3](https://modelscope.cn/models/MiniMax/MiniMax-H3)
+  - MiniMax 官网：[minimax.io](https://www.minimax.io)
+  - 在线 API（全球）：[Video Generation API](https://platform.minimax.io/docs/api-reference/video-generation-v2-create)
+  - 在线 App（Hailuo）：[hailuoai.video](https://hailuoai.video)
+- SGLang cookbook（交互式部署/请求模板）：上游仓库 [`docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx`](https://github.com/sgl-project/sglang/blob/main/docs_new/cookbook/diffusion/MiniMax/MiniMax-H3.mdx)
+- 主支持 PR：[#33275](https://github.com/sgl-project/sglang/pull/33275)
+- 核心实现入口（上游 main）：
+  - [`minimax_h3_pipeline.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/multimodal_gen/runtime/pipelines/minimax_h3_pipeline.py)
+  - [`dits/minimax_h3.py`](https://github.com/sgl-project/sglang/blob/main/python/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py)
+  - [`model_specific_stages/minimax_h3/`](https://github.com/sgl-project/sglang/tree/main/python/sglang/multimodal_gen/runtime/pipelines_core/stages/model_specific_stages/minimax_h3)
