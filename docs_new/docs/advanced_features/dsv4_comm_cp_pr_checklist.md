@@ -339,13 +339,12 @@ Prefill CP 旧路径每层 gather 物化完整 KV 再 compress，费显存/通�
 
 ### 开关 / 启用方式
 
-```text
-# 见 PR environ.py patch（名称以抓取时为准）
-# 异地优先扫这些路径是否存在：
-kernels/.../direct_cp_kv_store.cuh|.py
-kernels/ops/attention/dsv4/cp_compress.py
-compressor_v2.py 中的 direct/semantic 分支
+```bash
+SGLANG_OPT_DSV4_CP_DIRECT_KV_STORE=1   # 各 CP rank 直写 replicated FlashMLA cache，去掉 BF16 KV AG+rerange
+SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compressor state，替代 token-level FP32 AG
 ```
+
+异地优先扫路径：`direct_cp_kv_store.cuh|.py`、`cp_compress.py`、`compressor_v2` 对应分支。
 
 ### 关键文件 / 符号（异地核对点）
 
