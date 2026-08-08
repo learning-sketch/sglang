@@ -4102,5 +4102,6 @@ rg -n "flashinfer.*mnnvl|FlashInferMnnvl|pure.?allreduce|all_reduce_raw" -g '*.p
 ## 备注
 
 - 大 PR（#32059/#29187/#30416/#33236/#28639）此处只贴**代表性 diff**；完整以 GitHub PR Files 为准。
-- 作者/行数以抓取时刻 `gh pr view` 为准，force-push 后可能变化。
+- 作者/行数/性能数字以抓取时刻 `gh pr view` / PR body 为准，force-push 后可能变化。
 - 「本地已有不等价 upstream」时，请在核对框旁注明 commit/hash。
+- **性能数字均为 upstream PR 自称**，异地复现请用同硬件/同 recipe；H200 与 GB200/H20 数字不可直接横比。
