@@ -968,6 +968,9 @@ class Req(ReqDllmMixin):
             self.output_token_sampling_logprobs = None
         self.hidden_states: List[List[float]] = []
         self.hidden_states_tensor = None  # Note: use tensor instead of list to transfer hidden_states when PD + MTP
+        # Minimal DSpark PD PoC: short Prefill aux-hidden tail for Decode bootstrap.
+        self.prefill_tail_hidden_states_tensor = None
+        self.prefill_tail_valid_mask = None
         self.output_topk_p = None
         self.output_topk_index = None
         self.output_dsa_topk_indices = None

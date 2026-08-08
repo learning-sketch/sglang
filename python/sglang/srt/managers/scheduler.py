@@ -1138,6 +1138,31 @@ class Scheduler(
             disagg_hidden_size = 16  # minimal padding size for RDMA
             disagg_hidden_states_dtype = torch.float32
 
+        # Minimal DSpark PD PoC: Prefill (no DSPARK) and Decode (DSPARK) must
+        # agree on the metadata wire schema for aux-hidden + short tail.
+        dspark_prefill_tail_len = 0
+        try:
+            from sglang.srt.speculative.dspark_components.dspark_disaggregation import (
+                resolve_dspark_pd_metadata_hidden_spec,
+            )
+
+            dspark_spec = resolve_dspark_pd_metadata_hidden_spec(
+                server_args=self.server_args,
+                model_hidden_size=int(self.model_config.hidden_size),
+                model_dtype=self.model_config.dtype,
+                hf_config=self.model_config.hf_config,
+            )
+            if dspark_spec is not None:
+                disagg_hidden_size, disagg_hidden_states_dtype, dspark_prefill_tail_len, _ = (
+                    dspark_spec
+                )
+        except Exception:
+            logger.warning(
+                "Failed to resolve DSpark PD metadata hidden spec; falling back "
+                "to default padding.",
+                exc_info=True,
+            )
+
         # The PD metadata wire schema must match on P and D even when only D
         # enables spec decoding; a seedless prefill writes the invalid sentinel.
         output_dsa_topk_indices_dim = get_dsa_seed_metadata_dim(
@@ -1160,6 +1185,7 @@ class Scheduler(
                 hidden_states_dtype=disagg_hidden_states_dtype,
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
                 output_dsa_topk_indices_dim=output_dsa_topk_indices_dim,
+                dspark_prefill_tail_len=dspark_prefill_tail_len,
             )
 
             # The decode requests polling kv cache
@@ -1206,6 +1232,7 @@ class Scheduler(
                 hidden_states_dtype=disagg_hidden_states_dtype,
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
                 output_dsa_topk_indices_dim=output_dsa_topk_indices_dim,
+                dspark_prefill_tail_len=dspark_prefill_tail_len,
             )
 
             self.disagg_prefill_bootstrap_queue = PrefillBootstrapQueue(

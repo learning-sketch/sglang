@@ -237,9 +237,11 @@ class MetadataBuffers:
         max_sampling_mask_tokens: Optional[int] = None,
         custom_mem_pool: torch.cuda.MemPool = None,
         output_dsa_topk_indices_dim: int = 0,
+        dspark_prefill_tail_len: int = 0,
     ):
         self.custom_mem_pool = custom_mem_pool
         self.output_dsa_topk_indices_dim = output_dsa_topk_indices_dim
+        self.dspark_prefill_tail_len = max(0, int(dspark_prefill_tail_len))
         if max_sampling_mask_tokens is None:
             max_sampling_mask_tokens = (
                 envs.SGLANG_DISAGGREGATION_SAMPLING_MASK_MAX_TOKENS.get()
@@ -305,6 +307,19 @@ class MetadataBuffers:
             self.output_hidden_states = torch.zeros(
                 (size, hidden_size), dtype=hidden_states_dtype, device=device
             )
+            self.output_dspark_prefill_tail_hidden_states = None
+            self.output_dspark_prefill_tail_valid_mask = None
+            if self.dspark_prefill_tail_len > 0:
+                self.output_dspark_prefill_tail_hidden_states = torch.zeros(
+                    (size, self.dspark_prefill_tail_len, hidden_size),
+                    dtype=hidden_states_dtype,
+                    device=device,
+                )
+                self.output_dspark_prefill_tail_valid_mask = torch.zeros(
+                    (size, self.dspark_prefill_tail_len),
+                    dtype=torch.bool,
+                    device=device,
+                )
             if self.output_dsa_topk_indices_dim > 0:
                 self.output_dsa_topk_indices = torch.full(
                     (size, self.output_dsa_topk_indices_dim),
@@ -343,6 +358,13 @@ class MetadataBuffers:
                 self.output_hidden_states,
             ]
         )
+        if self.output_dspark_prefill_tail_hidden_states is not None:
+            bufs.extend(
+                [
+                    self.output_dspark_prefill_tail_hidden_states,
+                    self.output_dspark_prefill_tail_valid_mask,
+                ]
+            )
         if self.output_dsa_topk_indices is not None:
             bufs.append(self.output_dsa_topk_indices)
         bufs.append(self.bootstrap_room)
@@ -359,6 +381,13 @@ class MetadataBuffers:
             sampling_mask_len = self.output_token_sampling_mask_len[idx].clone()
             sampling_mask_idx = self.output_token_sampling_mask_idx[idx].clone()
             sampling_logprobs = self.output_token_sampling_logprobs[idx].clone()
+        dspark_tail_hidden = None
+        dspark_tail_mask = None
+        if self.output_dspark_prefill_tail_hidden_states is not None:
+            dspark_tail_hidden = self.output_dspark_prefill_tail_hidden_states[
+                idx
+            ].clone()
+            dspark_tail_mask = self.output_dspark_prefill_tail_valid_mask[idx].clone()
         return (
             self.output_ids[idx].clone(),
             self.cached_tokens[idx].clone(),
@@ -372,6 +401,8 @@ class MetadataBuffers:
             self.output_topk_p[idx].clone(),
             self.output_topk_index[idx].clone(),
             self.output_hidden_states[idx].clone(),
+            dspark_tail_hidden,
+            dspark_tail_mask,
             (
                 self.output_dsa_topk_indices[idx].clone()
                 if self.output_dsa_topk_indices is not None
@@ -473,17 +504,20 @@ class MetadataBuffers:
                     self.output_token_sampling_logprobs[req.metadata_buffer_index][
                         0
                     ] = float(sampling_logprob)
-        # For PD + spec decode
+        # For PD + spec decode. EAGLE carries topk + hidden; DSpark only needs
+        # the target aux-hidden row (+ optional short prefill tail) to bootstrap
+        # draft-side cache on the decode node.
+        self.output_hidden_states[req.metadata_buffer_index].zero_()
         if req.hidden_states_tensor is not None:
-            # speculative_eagle_topk should not be greater than 16 currently
-            topk = req.output_topk_p.size(0)
-
-            self.output_topk_p[req.metadata_buffer_index, :topk].copy_(
-                req.output_topk_p
-            )
-            self.output_topk_index[req.metadata_buffer_index, :topk].copy_(
-                req.output_topk_index
-            )
+            if req.output_topk_p is not None and req.output_topk_index is not None:
+                # speculative_eagle_topk should not be greater than 16 currently
+                topk = req.output_topk_p.size(0)
+                self.output_topk_p[req.metadata_buffer_index, :topk].copy_(
+                    req.output_topk_p
+                )
+                self.output_topk_index[req.metadata_buffer_index, :topk].copy_(
+                    req.output_topk_index
+                )
             self.output_hidden_states[req.metadata_buffer_index].copy_(
                 req.hidden_states_tensor
             )
@@ -495,6 +529,22 @@ class MetadataBuffers:
                     )
                 else:
                     self.output_dsa_topk_indices[req.metadata_buffer_index].fill_(-1)
+        if self.output_dspark_prefill_tail_hidden_states is not None:
+            self.output_dspark_prefill_tail_hidden_states[
+                req.metadata_buffer_index
+            ].zero_()
+            self.output_dspark_prefill_tail_valid_mask[req.metadata_buffer_index].zero_()
+            tail = getattr(req, "prefill_tail_hidden_states_tensor", None)
+            mask = getattr(req, "prefill_tail_valid_mask", None)
+            if tail is not None and mask is not None:
+                copy_len = min(tail.shape[0], self.dspark_prefill_tail_len)
+                if copy_len > 0:
+                    self.output_dspark_prefill_tail_hidden_states[
+                        req.metadata_buffer_index, -copy_len:
+                    ].copy_(tail[-copy_len:])
+                    self.output_dspark_prefill_tail_valid_mask[
+                        req.metadata_buffer_index, -copy_len:
+                    ].copy_(mask[-copy_len:])
         # Store bootstrap_room for validation on decode side
         self.bootstrap_room[req.metadata_buffer_index, 0] = (
             req.bootstrap_room if req.bootstrap_room is not None else 0

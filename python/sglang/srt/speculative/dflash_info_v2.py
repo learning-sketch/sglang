@@ -56,6 +56,12 @@ class DFlashDraftInputV2(SpecInput):
 
     verify_token_budget: Optional[int] = None
 
+    # Minimal DSpark PD handoff fields (Prefill -> Decode metadata buffer).
+    prefill_tail_hidden_states: Optional[torch.Tensor] = None
+    prefill_tail_valid_mask: Optional[torch.Tensor] = None
+    prefill_tail_start_positions: Optional[torch.Tensor] = None
+    pd_hidden_pending_inject: bool = False
+
     def __post_init__(self):
         super().__init__(spec_input_type=SpecInputType.DFLASH_DRAFT)
         # Spec v2 draft state itself does not change token accounting.

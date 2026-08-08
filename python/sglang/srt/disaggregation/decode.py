@@ -1682,6 +1682,8 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             output_topk_p,
             output_topk_index,
             output_hidden_states,
+            output_dspark_prefill_tail_hidden_states,
+            output_dspark_prefill_tail_valid_mask,
             output_dsa_topk_indices,
             output_bootstrap_room,
         ) = self.metadata_buffers.get_buf(idx)
@@ -1776,6 +1778,12 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
             decode_req.req.output_topk_p = output_topk_p
             decode_req.req.output_topk_index = output_topk_index
             decode_req.req.hidden_states_tensor = output_hidden_states
+            decode_req.req.prefill_tail_hidden_states_tensor = (
+                output_dspark_prefill_tail_hidden_states
+            )
+            decode_req.req.prefill_tail_valid_mask = (
+                output_dspark_prefill_tail_valid_mask
+            )
             if (
                 output_dsa_topk_indices is not None
                 and torch.all(output_dsa_topk_indices < 0).item()
