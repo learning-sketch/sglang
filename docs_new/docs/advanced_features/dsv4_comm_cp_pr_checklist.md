@@ -183,9 +183,10 @@ rg -n "flashinfer_allreduce|kAllReduce|_can_use_flashinfer_allreduce" -g '*.py' 
 
 ---
 
-## 🚀 PR #30700 — [NVIDIA] Add flashinfer MNNVL backend for allreduce only
+## 🅳🚀 PR #30700 — [NVIDIA] Add flashinfer MNNVL backend for allreduce only
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **D 节点**：✅ 相关（decode 路径每层 pure AR）
 - **性能标记**：🚀 **直接吞吐/延迟**（Blackwell TP4 decode +2.6%~+6.9%；BS64 偶发 -1.4%）
 - **URL**：https://github.com/sgl-project/sglang/pull/30700
 - **分类**：通信原语
@@ -2884,9 +2885,10 @@ index cfac77f383fd..74b7ced6152a 100644
 
 ---
 
-## 📦 PR #30416 — [DRAFT] add DCP support for DeepSeek V4
+## 🅳📦 PR #30416 — [DRAFT] add DCP support for DeepSeek V4
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**（仍带 draft 色彩）
+- **D 节点**：✅ **核心**（Decode Context Parallel，专打 D 侧 KV 显存）
 - **性能标记**：📦 **容量/可服务性**（解码 KV 切分，缓解 H20 显存墙；非小幅 TTFT 微调）
 - **URL**：https://github.com/sgl-project/sglang/pull/30416
 - **分类**：Decode CP
