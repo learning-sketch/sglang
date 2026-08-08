@@ -3,37 +3,80 @@
 > 来源：[#33636](https://github.com/sgl-project/sglang/issues/33636) 分类 *Communication & context parallelism*  
 > 状态抓取时间（UTC）：2026-08-08 08:08  
 > 仓库：`sgl-project/sglang`  
-> 用途：在另一个代码树/分支上逐项核对「做了没有」；**已合入 upstream main 的单独标注**。
+> 用途：在另一个代码树/分支上逐项核对「做了没有」；**已合入 upstream main 的单独标注**；**有性能收益的 PR 用 🚀 重点标注**。
+
+## 图例
+
+| 标记 | 含义 |
+|---|---|
+| ✅ MERGED | 已合入 upstream `main` |
+| ❌ OPEN | 尚未合入 |
+| 🚀 吞吐/延迟 | PR 带明确 tok/s 或 TTFT 数字，直接性能收益 |
+| 📦 容量/显存 | 主要增益是 KV 容量 / 可服务更长上下文 / 降显存复制（吞吐可能持平或略降） |
+| 🔧 使能 | 本身无独立 bench，但是 🚀/📦 的前置框架 |
+| 🛠 正确性/产品 | 不以性能数字为目标（修 bug / 功能入口） |
 
 ## 0. 总表（先扫一眼）
 
-| # | 状态 | 分类 | 一句话 | +/- | Author |
-|---|---|---|---|---|---|
-| [#30700](https://github.com/sgl-project/sglang/pull/30700) | ❌ OPEN | 通信原语 | FlashInfer MNNVL 纯 allreduce（多机 TP / GB200） | +476/-6 | @wenscarl |
-| [#33236](https://github.com/sgl-project/sglang/pull/33236) | ❌ OPEN | Prefill CP 存储 | 去掉 prefill CP 每层 KV/compressor 完整物化，改 direct KV + semantic compress | +1533/-44 | @foraxe |
-| [#28639](https://github.com/sgl-project/sglang/pull/28639) | ❌ OPEN | 通信重叠 | symmetric-memory 上 AG⊗GEMM / MoE⊗RS overlap | +1367/-37 | @Zqy11 |
-| [#32059](https://github.com/sgl-project/sglang/pull/32059) | ❌ OPEN | Prefill CP 存储 | VMM Shared KV：每 CP rank 持有物理页分片 | +7748/-121 | @taoyuanyuan |
-| [#33382](https://github.com/sgl-project/sglang/pull/33382) | ❌ OPEN | Prefill CP LayerSplit | CP Cache LayerSplit 公共 infra（1/N） | +513/-210 | @jellysnack |
-| [#29187](https://github.com/sgl-project/sglang/pull/29187) | ❌ OPEN | Prefill CP LayerSplit | DSV4 CP KV LayerSplit 完整实现 | +3596/-415 | @jellysnack |
-| [#33532](https://github.com/sgl-project/sglang/pull/33532) | ✅ MERGED | Prefill CP 策略 | DSV4 接入 CP-v2 / interleave strategy | +161/-59 | @hzh0425 |
-| [#30416](https://github.com/sgl-project/sglang/pull/30416) | ❌ OPEN | Decode CP | DeepSeek V4 Decode Context Parallel (DCP) | +10346/-325 | @shiyu7 |
-| [#33250](https://github.com/sgl-project/sglang/pull/33250) | ❌ OPEN | 正确性 | 修 non-EP TBO + attn TP>1（依赖 #31700） | +157/-34 | @mikekg |
-| [#33217](https://github.com/sgl-project/sglang/pull/33217) | ❌ OPEN | 正确性 | 对非法 non-EP TBO+attnTP>1 做 policy guard | +62/-0 | @Oxygen56 |
-| [#31700](https://github.com/sgl-project/sglang/pull/31700) | ❌ OPEN | 正确性 | dp_gather_partial → dp_gather_replicate（attn-TP 副本） | +14/-4 | @mikekg |
-| [#30885](https://github.com/sgl-project/sglang/pull/30885) | ❌ OPEN | 产品形态 | DSV4 支持 PDMux（同进程 P/D mux） | +795/-44 | @shipiyouniao |
+| # | 状态 | 性能 | 分类 | 一句话 | 宣称收益（摘自 PR） | +/- | Author |
+|---|---|---|---|---|---|---|---|
+| [#30700](https://github.com/sgl-project/sglang/pull/30700) | ❌ OPEN | 🚀 | 通信原语 | FlashInfer MNNVL 纯 allreduce | Blackwell TP4 decode **+2.6%~+6.9%**（小 BS）；BS64 约 -1.4% | +476/-6 | @wenscarl |
+| [#33236](https://github.com/sgl-project/sglang/pull/33236) | ❌ OPEN | 🚀 | Prefill CP 存储 | 去 KV/compressor 物化 | GB200 CP4 mean TTFT **-2.8%~-5.7%**；AllGather 归因时长 **-98%** | +1533/-44 | @foraxe |
+| [#28639](https://github.com/sgl-project/sglang/pull/28639) | ❌ OPEN | 🚀 | 通信重叠 | ag_gemm + moe_rs overlap | Flash TTFT **~3.5%~5.3%**；Pro **~3.4%~3.6%**（H20，CP8） | +1367/-37 | @Zqy11 |
+| [#32059](https://github.com/sgl-project/sglang/pull/32059) | ❌ OPEN | 📦 | Prefill CP 存储 | VMM Shared KV | 容量↑；128K/256K prefill overhead 约 **+1.36%**（换容量） | +7748/-121 | @taoyuanyuan |
+| [#33382](https://github.com/sgl-project/sglang/pull/33382) | ❌ OPEN | 🔧 | Prefill CP LayerSplit | LayerSplit 公共 infra | 无独立 bench；解锁 #29187 | +513/-210 | @jellysnack |
+| [#29187](https://github.com/sgl-project/sglang/pull/29187) | ❌ OPEN | 📦 | Prefill CP LayerSplit | DSV4 LayerSplit 完整实现 | 有效 KV 容量大幅↑（例 full_token ~2.1M→~9.8M）；吞吐约 **-2.6%** | +3596/-415 | @jellysnack |
+| [#33532](https://github.com/sgl-project/sglang/pull/33532) | ✅ MERGED | 🔧 | Prefill CP 策略 | DSV4 接入 CP-v2 | 无 speed 数字；后续 Prefill CP 优化底座 | +161/-59 | @hzh0425 |
+| [#30416](https://github.com/sgl-project/sglang/pull/30416) | ❌ OPEN | 📦 | Decode CP | DCP for DeepSeek V4 | 解码侧 KV 切分，缓解 H20 显存墙 / 长上下文可服务性（draft） | +10346/-325 | @shiyu7 |
+| [#33250](https://github.com/sgl-project/sglang/pull/33250) | ❌ OPEN | 🛠 | 正确性 | 修 non-EP TBO + attn TP>1 | 无性能宣称；修好后才敢开 TBO（间接） | +157/-34 | @mikekg |
+| [#33217](https://github.com/sgl-project/sglang/pull/33217) | ❌ OPEN | 🛠 | 正确性 | TBO 非法路径 guard | 无性能宣称 | +62/-0 | @Oxygen56 |
+| [#31700](https://github.com/sgl-project/sglang/pull/31700) | ❌ OPEN | 🛠 | 正确性 | DP-attn gather 语义 | 无性能宣称；正确性前提 | +14/-4 | @mikekg |
+| [#30885](https://github.com/sgl-project/sglang/pull/30885) | ❌ OPEN | 🛠 | 产品形态 | DSV4 × PDMux | 功能入口；高并发吞吐仍另算，非本 PR 主目标 | +795/-44 | @shipiyouniao |
+
+### 🚀 性能收益专节（优先跟）
+
+> 按「直接 tok/s·TTFT 数字」与「容量型收益」分开。数字均摘自对应 PR body，异地复现以本地 bench 为准。
+
+#### A. 直接吞吐 / 延迟（🚀）— 未合入
+
+| 优先级 | PR | 场景 | 宣称数字 | 硬件/配置要点 |
+|---|---|---|---|---|
+| P0 | [#33236](https://github.com/sgl-project/sglang/pull/33236) | Prefill CP 去物化 | TTFT **-5.01% / -2.81% / -4.95% / -5.65%** @ 16K/32K/64K/128K；AG 时长归因 **-98.45%** | 4×GB200，Flash，TP4/attn-CP4，EP4 MegaMoE |
+| P0 | [#28639](https://github.com/sgl-project/sglang/pull/28639) | AG⊗GEMM + MoE⊗RS | Flash TTFT **5.00%~3.53%**；Pro **3.59%~3.39%**（16K→128K） | H20；Flash 1 节点 CP8TP8；Pro 3 节点 PP3-CP8-TP8 |
+| P1 | [#30700](https://github.com/sgl-project/sglang/pull/30700) | FlashInfer pure AR | decode tok/s **+6.9%→+2.6%**（BS1→16）；BS64 **-1.4%** | Blackwell，V4 Flash，TP4，`one_batch` |
+
+#### B. 容量 / 长上下文可服务性（📦）— 未合入
+
+| 优先级 | PR | 场景 | 宣称数字 / 性质 |
+|---|---|---|---|
+| P0 | [#32059](https://github.com/sgl-project/sglang/pull/32059) | Shared KV (VMM) | 每 CP rank 只持物理页分片 → 显存复制↓、可服务更长；128K/256K prefill overhead ~**+1.36%** |
+| P0 | [#29187](https://github.com/sgl-project/sglang/pull/29187) | LayerSplit 完整 | 例：`full_token` ~**2.12M → 9.84M**；吞吐约 **-2.6%** 换容量 |
+| P1 | [#30416](https://github.com/sgl-project/sglang/pull/30416) | Decode CP | 解码 KV 切分，主打 H20 显存墙 / 长上下文 decode 可服务性（仍 OPEN/draft） |
+
+#### C. 使能但无独立性能数字（🔧）
+
+| PR | 状态 | 说明 |
+|---|---|---|
+| [#33532](https://github.com/sgl-project/sglang/pull/33532) | ✅ 已合入 | CP-v2 / interleave 底座；后续 🚀/📦 Prefill CP PR 的前提 |
+| [#33382](https://github.com/sgl-project/sglang/pull/33382) | ❌ OPEN | LayerSplit 公共 infra；#29187 的 1/N |
+
+#### D. 非性能主目标（🛠）
+
+`#31700` / `#33217` / `#33250`（正确性；修好后 TBO 才可间接吃性能）· `#30885`（PDMux 产品入口）
 
 ### 合入情况小结
 
-- **已合入 upstream main：仅 [#33532](https://github.com/sgl-project/sglang/pull/33532)**（2026-08-07）。详见下方「已合入专节」。
-- 其余 11 个 PR 截至抓取时均为 **OPEN**（#30416 仍带 DRAFT 色彩）。
-- 正确性链路建议顺序：`#31700 → (#33217 guard / #33250 fix)`。
-- Prefill CP 存储栈建议顺序：`#33532(已合) → #33236 → #32059 → #33382 → #29187`，`#28639` 可并行。
+- **已合入 upstream main：仅 [#33532](https://github.com/sgl-project/sglang/pull/33532)**（2026-08-07，🔧 使能，无独立 speed 数字）。
+- **有 🚀 数字的性能 PR 全部仍 OPEN**：`#33236`、`#28639`、`#30700`。
+- **有 📦 容量收益的也全部仍 OPEN**：`#32059`、`#29187`、`#30416`。
+- 正确性链路：`#31700 → (#33217 guard / #33250 fix)`。
+- Prefill 性能包建议顺序：`#33532(已合🔧) → #33236(🚀) + #28639(🚀) → #32059(📦) → #33382(🔧) → #29187(📦)`。
 
 ### ✅ 已合入专节（upstream main）
 
-| PR | 合入日 | 核对关键词 |
-|---|---|---|
-| [#33532](https://github.com/sgl-project/sglang/pull/33532) CP V2 for dsv4 | 2026-08-07 | `SGLANG_ENABLE_CP_V2`, `cp_materialize_global_token_order`, `cp_round_robin_input_ids_v2`, `--cp-strategy interleave` |
+| PR | 合入日 | 性能标记 | 核对关键词 |
+|---|---|---|---|
+| [#33532](https://github.com/sgl-project/sglang/pull/33532) CP V2 for dsv4 | 2026-08-07 | 🔧 使能（无 speed 表） | `SGLANG_ENABLE_CP_V2`, `cp_materialize_global_token_order`, `cp_round_robin_input_ids_v2`, `--cp-strategy interleave` |
 
 若目标树 merge-base 晚于该合入，应已自带；若基于更旧 fork，按专节 / 下文 #33532 完整 diff 回放。
 
@@ -45,16 +88,32 @@
 2. **关键符号/文件**是否存在（见各节「关键文件 / 符号」）。
 3. **关键 diff 片段**是否已有等价改动（见各节「关键 diff」；大 PR 只贴代表性 hunk）。
 4. 在本节末尾勾选框标注本地状态。
+5. 对 🚀/📦 PR：额外记录本地是否复现到同量级收益。
 
 ---
 
-## PR #30700 — [NVIDIA] Add flashinfer MNNVL backend for allreduce only
+## 🚀 PR #30700 — [NVIDIA] Add flashinfer MNNVL backend for allreduce only
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🚀 **直接吞吐/延迟**（Blackwell TP4 decode +2.6%~+6.9%；BS64 偶发 -1.4%）
 - **URL**：https://github.com/sgl-project/sglang/pull/30700
 - **分类**：通信原语
 - **Author**：@wenscarl  ·  diffstat `+476/-6`
 - **一句话**：FlashInfer MNNVL 纯 allreduce（多机 TP / GB200）
+
+### 性能收益（PR 宣称）
+
+| BS | Old decode tok/s | PR decode tok/s | Δ |
+|---|---:|---:|---:|
+| 1 | 147.51 | 157.69 | **+6.9%** |
+| 2 | 285.43 | 304.95 | **+6.8%** |
+| 4 | 535.28 | 569.52 | **+6.4%** |
+| 8 | 1071.14 | 1103.58 | **+3.0%** |
+| 16 | 1966.24 | 2016.57 | **+2.6%** |
+| 32 | 3510.57 | 3616.18 | **+3.0%** |
+| 64 | 6247.72 | 6157.77 | **-1.4%** |
+
+配置：DeepSeek-V4-Flash，Blackwell，TP=4，`sglang.benchmark.one_batch`。
 
 ### 做什么
 
@@ -325,13 +384,25 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 
 ---
 
-## PR #33236 — [Perf][DSV4] Remove prefill CP KV and compressor materialization
+## 🚀 PR #33236 — [Perf][DSV4] Remove prefill CP KV and compressor materialization
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🚀 **直接 TTFT**（GB200 CP4 mean TTFT 约 -2.8%~-5.7%；AllGather 归因时长 -98%）
 - **URL**：https://github.com/sgl-project/sglang/pull/33236
 - **分类**：Prefill CP 存储
 - **Author**：@foraxe  ·  diffstat `+1533/-44`
 - **一句话**：去掉 prefill CP 每层 KV/compressor 完整物化，改 direct KV + semantic compress
+
+### 性能收益（PR 宣称）
+
+| Input | Conc | Baseline TTFT | Opt TTFT | Δ |
+|---|---:|---:|---:|---:|
+| 16K | 300 | 238.54 ms | 226.60 ms | **-5.01%** |
+| 32K | 150 | 450.74 ms | 438.06 ms | **-2.81%** |
+| 64K | 100 | 927.05 ms | 881.20 ms | **-4.95%** |
+| 128K | 50 | 1784.71 ms | 1683.81 ms | **-5.65%** |
+
+配置：4×GB200，DeepSeek-V4-Flash，TP4/attn-CP4，EP4 MegaMoE，chunk 16384。另称移除 **99.06%** AllGather 调用、**98.45%** AG kernel-duration 归因。
 
 ### 做什么
 
@@ -762,13 +833,36 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
 
 ---
 
-## PR #28639 — [Perf][DSV4] add ag_gemm and moe_rs overlap kernels for dsv4 prefill
+## 🚀 PR #28639 — [Perf][DSV4] add ag_gemm and moe_rs overlap kernels for dsv4 prefill
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🚀 **直接 TTFT**（Flash ~3.5%~5.3%；Pro ~3.4%~3.6%，H20 CP8）
 - **URL**：https://github.com/sgl-project/sglang/pull/28639
 - **分类**：通信重叠
 - **Author**：@Zqy11  ·  diffstat `+1367/-37`
 - **一句话**：symmetric-memory 上 AG⊗GEMM / MoE⊗RS overlap
+
+### 性能收益（PR 宣称）
+
+**DSV4-Flash**（1 节点，CP8-TP8）：
+
+| Input | Baseline TTFT | Overlap | Speedup |
+|---|---:|---:|---:|
+| 16k | 548.89 ms | 521.44 ms | **5.00%** |
+| 32k | 1092.81 ms | 1034.50 ms | **5.33%** |
+| 64k | 2200.69 ms | 2122.33 ms | **3.56%** |
+| 128k | 4664.76 ms | 4500.17 ms | **3.53%** |
+
+**DSV4-Pro**（3 节点，PP3-CP8-TP8）：
+
+| Input | Baseline TTFT | Overlap | Speedup |
+|---|---:|---:|---:|
+| 16k | 1066.37 ms | 1028.04 ms | **3.59%** |
+| 32k | 1641.93 ms | 1586.49 ms | **3.37%** |
+| 64k | 2832.55 ms | 2731.91 ms | **3.55%** |
+| 128k | 5355.57 ms | 5173.78 ms | **3.39%** |
+
+硬件：每节点 8×H20 + 4×双口 200Gbps NIC。
 
 ### 做什么
 
@@ -1025,13 +1119,20 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
 
 ---
 
-## PR #32059 — [Feat][DeepSeek V4] Shared KV Cache for Prefill CP
+## 📦 PR #32059 — [Feat][DeepSeek V4] Shared KV Cache for Prefill CP
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：📦 **容量/显存型**（降每-rank KV 复制；128K/256K prefill overhead ~+1.36% 换容量）
 - **URL**：https://github.com/sgl-project/sglang/pull/32059
 - **分类**：Prefill CP 存储
 - **Author**：@taoyuanyuan  ·  diffstat `+7748/-121`
 - **一句话**：VMM Shared KV：每 CP rank 持有物理页分片
+
+### 性能收益（PR 宣称）
+
+- Flash 在 8×H20-3e、CP8TP8、FP8 KV、chunk 8192、conc=1 上完成 functional/capacity/perf 验证。
+- 128K / 256K Prefill overhead 约 **+1.36% / +1.37%**（相对非 shared；用少量开销换共享页容量）。
+- Pro 验证仍待完成。
 
 ### 做什么
 
@@ -1459,13 +1560,18 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 
 ---
 
-## PR #33382 — feat: 1/N DeepSeek V4 CP Cache LayerSplit: Common Infrastructure
+## 🔧 PR #33382 — feat: 1/N DeepSeek V4 CP Cache LayerSplit: Common Infrastructure
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🔧 **使能**（无独立 bench；为 #29187 📦 铺路）
 - **URL**：https://github.com/sgl-project/sglang/pull/33382
 - **分类**：Prefill CP LayerSplit
 - **Author**：@jellysnack  ·  diffstat `+513/-210`
 - **一句话**：CP Cache LayerSplit 公共 infra（1/N）
+
+### 性能收益（PR 宣称）
+
+无独立速度数字。价值是解锁 LayerSplit 完整实现（#29187）的容量收益。
 
 ### 做什么
 
@@ -1783,13 +1889,19 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 
 ---
 
-## PR #29187 — feat: Add DeepSeek V4 CP KV LayerSplit
+## 📦 PR #29187 — feat: Add DeepSeek V4 CP KV LayerSplit
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：📦 **容量型**（有效 KV 大幅↑；吞吐约 -2.6% 换容量）
 - **URL**：https://github.com/sgl-project/sglang/pull/29187
 - **分类**：Prefill CP LayerSplit
 - **Author**：@jellysnack  ·  diffstat `+3596/-415`
 - **一句话**：DSV4 CP KV LayerSplit 完整实现
+
+### 性能收益（PR 宣称）
+
+- 内存测算示例：`full_token` 约 **2,117,376 → 9,842,944**（同 ~36.63GB available 下容量大涨）。
+- Throughput benchmark：LayerSplit 吞吐约比 baseline **低 2.6%**，换「显著更大的有效 KV 容量」。
 
 ### 做什么
 
@@ -2198,13 +2310,18 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 
 ---
 
-## PR #33532 — [CP]: Support CP V2 Strategy for dsv4
+## 🔧 ✅ PR #33532 — [CP]: Support CP V2 Strategy for dsv4
 
 - **Upstream 状态**：✅ **已合入** (2026-08-07)
+- **性能标记**：🔧 **使能**（PR 未附 speed 表；后续 🚀/📦 Prefill CP 的框架前提）
 - **URL**：https://github.com/sgl-project/sglang/pull/33532
 - **分类**：Prefill CP 策略
 - **Author**：@hzh0425  ·  diffstat `+161/-59`
 - **一句话**：DSV4 接入 CP-v2 / interleave strategy
+
+### 性能收益（PR 宣称）
+
+无独立 TTFT/tok/s 数字。合入意义是让 DSV4 走上统一 CP-v2，便于叠加 #33236/#28639/#32059/#29187。
 
 ### 做什么
 
@@ -2676,13 +2793,19 @@ index cfac77f383fd..74b7ced6152a 100644
 
 ---
 
-## PR #30416 — [DRAFT] add DCP support for DeepSeek V4
+## 📦 PR #30416 — [DRAFT] add DCP support for DeepSeek V4
 
-- **Upstream 状态**：❌ **未合入 (OPEN)**
+- **Upstream 状态**：❌ **未合入 (OPEN)**（仍带 draft 色彩）
+- **性能标记**：📦 **容量/可服务性**（解码 KV 切分，缓解 H20 显存墙；非小幅 TTFT 微调）
 - **URL**：https://github.com/sgl-project/sglang/pull/30416
 - **分类**：Decode CP
 - **Author**：@shiyu7  ·  diffstat `+10346/-325`
 - **一句话**：DeepSeek V4 Decode Context Parallel (DCP)
+
+### 性能收益（PR 宣称）
+
+- 动机：H20 上权重大、KV/并发头寸紧；DCP 切 decode-side KV，服务更长上下文 / 更高并发。
+- PR body 主打 correctness + GSM8K 等；Speed 小节仍空。社区此前讨论有 DCP4 vs TP4 量级吞吐对比，**以 PR 最终 bench 为准**，此处标为容量型优先。
 
 ### 做什么
 
@@ -3055,13 +3178,18 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
 
 ---
 
-## PR #33250 — [Bugfix] Fix DeepSeek-V4 non-EP TBO for attention TP > 1
+## 🛠 PR #33250 — [Bugfix] Fix DeepSeek-V4 non-EP TBO for attention TP > 1
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🛠 **正确性**（修好后才可安全开 TBO → 间接性能）
 - **URL**：https://github.com/sgl-project/sglang/pull/33250
 - **分类**：正确性
 - **Author**：@mikekg  ·  diffstat `+157/-34`
 - **一句话**：修 non-EP TBO + attn TP>1（依赖 #31700）
+
+### 性能收益（PR 宣称）
+
+无直接数字。间接：解锁非 EP + attn TP>1 下的 TBO。
 
 ### 做什么
 
@@ -3280,13 +3408,18 @@ index 65dd55549924..7e033d8d9a1c 100644
 
 ---
 
-## PR #33217 — Fix non-EP DeepSeek-V4 TBO for attention TP > 1
+## 🛠 PR #33217 — Fix non-EP DeepSeek-V4 TBO for attention TP > 1
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🛠 **正确性 guard**（防止错误路径，不宣称加速）
 - **URL**：https://github.com/sgl-project/sglang/pull/33217
 - **分类**：正确性
 - **Author**：@Oxygen56  ·  diffstat `+62/-0`
 - **一句话**：对非法 non-EP TBO+attnTP>1 做 policy guard
+
+### 性能收益（PR 宣称）
+
+无。属于挡门/防静默错。
 
 ### 做什么
 
@@ -3396,13 +3529,18 @@ index 000000000000..f45457133c86
 
 ---
 
-## PR #31700 — Fix DeepSeek-V4/DeepSeek-V4-Pro DP-attention gather semantics
+## 🛠 PR #31700 — Fix DeepSeek-V4/DeepSeek-V4-Pro DP-attention gather semantics
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🛠 **正确性前提**（#33250 依赖；无 speed 表）
 - **URL**：https://github.com/sgl-project/sglang/pull/31700
 - **分类**：正确性
 - **Author**：@mikekg  ·  diffstat `+14/-4`
 - **一句话**：dp_gather_partial → dp_gather_replicate（attn-TP 副本）
+
+### 性能收益（PR 宣称）
+
+无。修 gather 语义后数值才对，TBO/DP-attn 组合才可信。
 
 ### 做什么
 
@@ -3487,13 +3625,19 @@ index f8d03952478c..bfadeff15a70 100644
 
 ---
 
-## PR #30885 — [Feature] Support DeepSeek V4 in PDMux
+## 🛠 PR #30885 — [Feature] Support DeepSeek V4 in PDMux
 
 - **Upstream 状态**：❌ **未合入 (OPEN)**
+- **性能标记**：🛠 **产品/兼容**（功能入口；高并发吞吐另算，非本 PR 主目标）
 - **URL**：https://github.com/sgl-project/sglang/pull/30885
 - **分类**：产品形态
 - **Author**：@shipiyouniao  ·  diffstat `+795/-44`
 - **一句话**：DSV4 支持 PDMux（同进程 P/D mux）
+
+### 性能收益（PR 宣称）
+
+- 完成 C1/C2 长上下文功能验证；C20 压力未在观察窗完成。
+- PR 明确：高并发 PDMux 吞吐 scaling **另议题**，本 PR 以兼容为主。
 
 ### 做什么
 
@@ -3898,35 +4042,37 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 
 ---
 
-## 依赖关系（核对时注意顺序）
+## 依赖关系（核对时注意顺序；含性能标记）
 
 ```text
 通信底座
-  #30700 FlashInfer MNNVL pure AR
-  #28639 ag_gemm / moe_rs symm-mem overlap
+  #30700 FlashInfer MNNVL pure AR          🚀 decode tok/s
+  #28639 ag_gemm / moe_rs symm-mem overlap 🚀 prefill TTFT
 
 Prefill CP
-  #33532 CP V2 interleave for DSV4     ✅ MERGED
+  #33532 CP V2 interleave for DSV4         🔧 ✅ MERGED
        ↓
-  #33236 remove KV/compressor materialization
+  #33236 remove KV/compressor materialize  🚀 TTFT（优先）
+       +
+  #28639 overlap kernels                   🚀 TTFT（可并行）
        ↓
-  #32059 Shared KV via VMM
+  #32059 Shared KV via VMM                 📦 容量
        ↓
-  #33382 LayerSplit common infra
+  #33382 LayerSplit common infra           🔧
        ↓
-  #29187 DSV4 LayerSplit full
+  #29187 DSV4 LayerSplit full              📦 容量（吞吐略降）
 
 Decode CP
-  #30416 DCP (draft/open)
+  #30416 DCP (draft/open)                  📦 长上下文可服务性
 
-正确性
-  #31700 dp_gather_replicate
+正确性（间接解锁 TBO 性能）
+  #31700 dp_gather_replicate               🛠
        ↓
-  #33217 TBO policy guard
-  #33250 TBO fix (depends #31700)
+  #33217 TBO policy guard                  🛠
+  #33250 TBO fix (depends #31700)          🛠
 
 产品
-  #30885 DSV4 × PDMux
+  #30885 DSV4 × PDMux                      🛠 功能入口
 ```
 
 ## 异地快速符号扫描命令（可选）
