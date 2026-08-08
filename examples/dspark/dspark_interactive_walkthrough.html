@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSpark 投机解码 · 交互式代码走读</title>
+<!--
+  单文件交互讲解页:直接用浏览器打开即可,无需任何依赖。
+  内容对应 sglang 源码(行号以走读时的代码版本为准):
+    python/sglang/srt/speculative/dspark_components/*
+    python/sglang/srt/managers/scheduler.py
+    python/sglang/srt/models/deepseek_v4.py 等
+  键盘:Space 播放/暂停 · ← / → 单步 · R 重置
+-->
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1c2330;
+    --border: #2d3748;
+    --text: #dbe4f0;
+    --muted: #8b98ab;
+    --accent: #58a6ff;
+    --accent2: #f0883e;
+    --green: #3fb950;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --yellow: #d29922;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; font-weight: 600; white-space: nowrap; }
+  header h1 .sub { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  #phaseBadge {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    background: rgba(88,166,255,.15); color: var(--accent);
+    border: 1px solid rgba(88,166,255,.4); white-space: nowrap;
+  }
+  .controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .controls button {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 14px; font-size: 13px; cursor: pointer;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .controls button:hover { background: #263041; border-color: var(--accent); }
+  .controls button.primary { background: var(--accent); color: #04101f; border-color: var(--accent); font-weight: 600; }
+  .controls button.primary:hover { background: #79b8ff; }
+  .controls button:disabled { opacity: .35; cursor: default; }
+  #stepIndicator { font-family: var(--mono); font-size: 13px; color: var(--muted); min-width: 56px; text-align: center; }
+  select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 8px; font-size: 13px;
+  }
+  .kbdhint { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .kbdhint kbd {
+    font-family: var(--mono); font-size: 10px; padding: 1px 5px;
+    border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px;
+    background: var(--panel2); margin: 0 1px;
+  }
+
+  /* ---------- 主区 ---------- */
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage {
+    flex: 1.35; display: flex; flex-direction: column; min-width: 0;
+    border-right: 1px solid var(--border);
+  }
+  #archWrap { padding: 6px 10px 0; }
+  #arch { width: 100%; height: auto; display: block; }
+
+  /* SVG 架构图 */
+  .node rect {
+    fill: var(--panel2); stroke: var(--border); stroke-width: 1.2; rx: 9;
+    transition: stroke .25s, fill .25s;
+  }
+  .node text { fill: var(--muted); font-size: 12.5px; text-anchor: middle; transition: fill .25s; }
+  .node .nodeSub { font-size: 9.5px; fill: #5b6879; }
+  .node.active rect { stroke: var(--accent); fill: #12233c; filter: drop-shadow(0 0 6px rgba(88,166,255,.45)); }
+  .node.active text { fill: var(--text); }
+  .node.active .nodeSub { fill: var(--accent); }
+  .edge {
+    stroke: #39434f; stroke-width: 1.6; fill: none;
+    marker-end: url(#arrowDim);
+    transition: stroke .25s;
+  }
+  .edge.active {
+    stroke: var(--accent); marker-end: url(#arrowLit);
+    stroke-dasharray: 7 5;
+    animation: flow .7s linear infinite;
+    filter: drop-shadow(0 0 3px rgba(88,166,255,.6));
+  }
+  .edge.activeWarm {
+    stroke: var(--accent2); marker-end: url(#arrowWarm);
+    stroke-dasharray: 7 5;
+    animation: flow .7s linear infinite;
+    filter: drop-shadow(0 0 3px rgba(240,136,62,.6));
+  }
+  @keyframes flow { to { stroke-dashoffset: -12; } }
+  .edgeLabel { font-size: 9.5px; fill: #5b6879; text-anchor: middle; transition: fill .25s; }
+  .edgeLabel.active { fill: var(--accent); }
+  .edgeLabel.activeWarm { fill: var(--accent2); }
+
+  /* 微观视图 */
+  #micro {
+    flex: 1; margin: 8px 10px 10px; padding: 14px 16px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    overflow: auto; min-height: 0;
+  }
+  #micro h3 { font-size: 13px; color: var(--accent); margin-bottom: 12px; font-weight: 600; }
+  .mrow { display: flex; align-items: center; gap: 6px; margin: 7px 0; flex-wrap: wrap; }
+  .mlabel { font-size: 11.5px; color: var(--muted); min-width: 118px; font-family: var(--mono); }
+  .tok {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 30px; height: 30px; padding: 0 4px;
+    border-radius: 6px; font-family: var(--mono); font-size: 11.5px;
+    border: 1px solid var(--border); background: var(--panel2); color: var(--muted);
+    animation: pop .4s both;
+    position: relative;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(8px) scale(.8); }
+    to   { opacity: 1; transform: none; }
+  }
+  .tok.prefix  { background: #1f2c40; border-color: #33507a; color: #9fc0ea; }
+  .tok.slot    { background: transparent; border-style: dashed; border-color: #4a5568; color: #4a5568; }
+  .tok.anchor  { background: #3a2c10; border-color: var(--yellow); color: #ffd479; font-weight: 700; }
+  .tok.mask    { background: repeating-linear-gradient(45deg, #232a36 0 5px, #1a2029 5px 10px); border-color: #4a5568; color: #7c8798; }
+  .tok.draft   { background: #33240f; border-color: var(--accent2); color: #ffb877; }
+  .tok.hid     { background: linear-gradient(135deg, #1d3450, #234064); border-color: #3d6db0; color: #a8cdf5; }
+  .tok.accept  { background: #12301b; border-color: var(--green); color: #7ee2a0; }
+  .tok.reject  { background: #38151a; border-color: var(--red); color: #ff9a94; text-decoration: line-through; }
+  .tok.bonus   { background: #2a1e3f; border-color: var(--purple); color: #d9bfff; font-weight: 700; }
+  .tok.hole    { background: transparent; border-color: #333c48; border-style: dotted; color: #333c48; }
+  .tok.dim     { opacity: .32; }
+  .tok.glow    { box-shadow: 0 0 8px rgba(88,166,255,.55); border-color: var(--accent); }
+
+  .confbar { display: inline-flex; align-items: flex-end; gap: 2px; height: 30px; }
+  .confbar i {
+    display: inline-block; width: 9px; border-radius: 2px 2px 0 0;
+    background: linear-gradient(to top, #2f81f7, #79c0ff);
+    animation: rise .5s both;
+  }
+  .confbar i.low { background: linear-gradient(to top, #6e4029, #f0883e); }
+  @keyframes rise { from { height: 0 !important; opacity: 0; } }
+
+  .mbox {
+    display: inline-block; padding: 8px 14px; margin: 4px 6px 4px 0;
+    border: 1px solid var(--border); border-radius: 9px; background: var(--panel2);
+    font-size: 12px; animation: pop .45s both;
+  }
+  .mbox.hl { border-color: var(--accent); color: var(--accent); background: #12233c; }
+  .mbox.warm { border-color: var(--accent2); color: var(--accent2); background: #2b1c0e; }
+  .mbox .big { font-size: 15px; font-weight: 700; }
+  .marrow { display: inline-block; color: var(--muted); margin: 0 8px; font-size: 15px; animation: pop .5s both; }
+  .mnote { font-size: 11.5px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
+  .mnote b { color: var(--text); }
+  .gframe {
+    border: 1.5px dashed #3d6db0; border-radius: 10px; padding: 8px 10px;
+    display: inline-block; margin: 4px 0; position: relative; animation: pop .5s both;
+  }
+  .gframe::before {
+    content: attr(data-label); position: absolute; top: -9px; left: 12px;
+    font-size: 10px; color: #3d6db0; background: var(--panel); padding: 0 6px;
+    font-family: var(--mono);
+  }
+
+  /* ---------- 右侧讲解 ---------- */
+  #explain {
+    flex: 1; min-width: 330px; max-width: 480px;
+    display: flex; flex-direction: column; background: var(--panel);
+    overflow: hidden;
+  }
+  #explainScroll { flex: 1; overflow-y: auto; padding: 18px 20px 26px; }
+  #explain h2 { font-size: 17px; margin-bottom: 4px; line-height: 1.45; }
+  #explain h2 .stepNo {
+    font-family: var(--mono); color: var(--accent); font-size: 13px;
+    margin-right: 8px; vertical-align: 2px;
+  }
+  .section { margin-top: 16px; animation: fadein .4s both; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .section h4 {
+    font-size: 12px; text-transform: none; letter-spacing: .4px;
+    color: var(--muted); margin-bottom: 7px; display: flex; align-items: center; gap: 6px;
+  }
+  .section h4::before { content: ""; width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .section.what h4::before { background: var(--accent); }
+  .section.why  h4::before { background: var(--accent2); }
+  .section.code h4::before { background: var(--purple); }
+  .section p, .section li { font-size: 13.5px; line-height: 1.85; color: var(--text); }
+  .section ul { padding-left: 18px; }
+  .section li { margin: 4px 0; }
+  .section code, .mnote code {
+    font-family: var(--mono); font-size: 12px; background: #232b38;
+    padding: 1px 5px; border-radius: 4px; color: #9fc0ea;
+  }
+  .codeloc {
+    display: block; font-family: var(--mono); font-size: 11.5px;
+    background: #10151d; border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; margin: 5px 0; color: #9fc0ea; line-height: 1.55;
+  }
+  .codeloc span { color: var(--muted); display: block; font-family: inherit; font-size: 11px; }
+  .hlterm { color: var(--accent2); font-weight: 600; }
+
+  /* ---------- 底部时间轴 ---------- */
+  footer {
+    border-top: 1px solid var(--border); background: var(--panel);
+    padding: 8px 14px 10px; overflow-x: auto; white-space: nowrap;
+  }
+  #progressWrap { height: 3px; background: var(--border); border-radius: 2px; margin-bottom: 8px; overflow: hidden; }
+  #progressBar { height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+  .phaseGroup { display: inline-flex; align-items: center; margin-right: 22px; vertical-align: top; }
+  .phaseName { font-size: 11px; color: var(--muted); margin-right: 8px; }
+  .dot {
+    width: 26px; height: 26px; border-radius: 50%; display: inline-flex;
+    align-items: center; justify-content: center; margin: 0 3px;
+    font-size: 11px; font-family: var(--mono); cursor: pointer;
+    background: var(--panel2); color: var(--muted); border: 1px solid var(--border);
+    transition: all .15s;
+  }
+  .dot:hover { border-color: var(--accent); color: var(--text); }
+  .dot.done { background: #12233c; color: #6ea8e8; border-color: #2c4a76; }
+  .dot.cur {
+    background: var(--accent); color: #04101f; border-color: var(--accent);
+    font-weight: 700; transform: scale(1.18);
+    box-shadow: 0 0 8px rgba(88,166,255,.6);
+  }
+
+  @media (max-width: 980px) {
+    main { flex-direction: column; overflow-y: auto; }
+    #stage { border-right: none; border-bottom: 1px solid var(--border); }
+    #explain { max-width: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DSpark 投机解码<span class="sub">一个新请求的完整链路 · sglang 源码走读</span></h1>
+  <span id="phaseBadge"></span>
+  <div class="controls">
+    <button id="btnReset" title="重置 (R)">⟲ 重置</button>
+    <button id="btnPrev" title="上一步 (←)">← 上一步</button>
+    <button id="btnPlay" class="primary" title="播放/暂停 (Space)">▶ 播放</button>
+    <button id="btnNext" title="下一步 (→)">下一步 →</button>
+    <span id="stepIndicator"></span>
+    <select id="speedSel" title="播放速度">
+      <option value="1.6">慢速</option>
+      <option value="1" selected>常速</option>
+      <option value="0.55">快速</option>
+    </select>
+    <span class="kbdhint"><kbd>Space</kbd>播放 <kbd>←</kbd><kbd>→</kbd>单步 <kbd>R</kbd>重置</span>
+  </div>
+</header>
+
+<main>
+  <div id="stage">
+    <div id="archWrap">
+      <svg id="arch" viewBox="0 0 880 330" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arrowDim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#39434f"/>
+          </marker>
+          <marker id="arrowLit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#58a6ff"/>
+          </marker>
+          <marker id="arrowWarm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#f0883e"/>
+          </marker>
+        </defs>
+
+        <!-- 边(先画,压在节点下面) -->
+        <path id="e_sched_worker"   class="edge" d="M440,62  L440,96"/>
+        <path id="e_worker_sched"   class="edge" d="M492,96  C520,80 520,78 492,62"/>
+        <path id="e_worker_draft"   class="edge" d="M340,124 L232,124"/>
+        <path id="e_worker_target"  class="edge" d="M540,124 L648,124"/>
+        <path id="e_worker_planner" class="edge" d="M392,152 L308,206"/>
+        <path id="e_worker_verifier" class="edge" d="M488,152 L572,206"/>
+        <path id="e_verifier_target" class="edge" d="M636,206 L700,152"/>
+        <path id="e_target_inj"     class="edge" d="M700,152 C620,230 520,268 486,282"/>
+        <path id="e_inj_draftkv"    class="edge" d="M382,290 L232,290"/>
+        <path id="e_draft_draftkv"  class="edge" d="M160,152 L160,266"/>
+        <path id="e_target_targetkv" class="edge" d="M712,152 L712,266"/>
+        <path id="e_planner_verifier" class="edge" d="M356,224 L524,224"/>
+
+        <text class="edgeLabel" id="l_sched_worker" x="470" y="84">forward_batch_generation</text>
+        <text class="edgeLabel" id="l_worker_draft" x="286" y="115">draft 块前向</text>
+        <text class="edgeLabel" id="l_worker_target" x="594" y="115">prefill / verify</text>
+        <text class="edgeLabel" id="l_target_inj" x="600" y="252">aux hidden</text>
+        <text class="edgeLabel" id="l_inj_draftkv" x="307" y="282">投影写入</text>
+        <text class="edgeLabel" id="l_planner_verifier" x="440" y="217">RaggedVerifyLayout</text>
+
+        <!-- 节点 -->
+        <g class="node" id="n_sched">
+          <rect x="340" y="18" width="200" height="44"/>
+          <text x="440" y="37">Scheduler</text>
+          <text x="440" y="52" class="nodeSub">run_batch · 事件循环</text>
+        </g>
+        <g class="node" id="n_worker">
+          <rect x="340" y="96" width="200" height="56"/>
+          <text x="440" y="119">DSparkWorkerV2</text>
+          <text x="440" y="136" class="nodeSub">draft → verify → accept 编排</text>
+        </g>
+        <g class="node" id="n_draft">
+          <rect x="88" y="96" width="144" height="56"/>
+          <text x="160" y="119">Draft 模型</text>
+          <text x="160" y="136" class="nodeSub">少层 + Markov 头</text>
+        </g>
+        <g class="node" id="n_target">
+          <rect x="648" y="96" width="144" height="56"/>
+          <text x="720" y="119">目标模型</text>
+          <text x="720" y="136" class="nodeSub">DeepSeek-V4 等</text>
+        </g>
+        <g class="node" id="n_planner">
+          <rect x="236" y="200" width="120" height="48"/>
+          <text x="296" y="220">VerifyPlanner</text>
+          <text x="296" y="236" class="nodeSub">置信度 → 预算</text>
+        </g>
+        <g class="node" id="n_verifier">
+          <rect x="524" y="200" width="132" height="48"/>
+          <text x="590" y="220">VerifyExecutor</text>
+          <text x="590" y="236" class="nodeSub">compact 验证 + accept</text>
+        </g>
+        <g class="node" id="n_inj">
+          <rect x="382" y="266" width="104" height="48"/>
+          <text x="434" y="286">KV Injector</text>
+          <text x="434" y="302" class="nodeSub">hidden → KV</text>
+        </g>
+        <g class="node" id="n_draftkv">
+          <rect x="88" y="266" width="144" height="48"/>
+          <text x="160" y="286">Draft KV cache</text>
+          <text x="160" y="302" class="nodeSub">共用 req_to_token</text>
+        </g>
+        <g class="node" id="n_targetkv">
+          <rect x="648" y="266" width="144" height="48"/>
+          <text x="720" y="286">Target KV cache</text>
+          <text x="720" y="302" class="nodeSub">token_to_kv_pool</text>
+        </g>
+      </svg>
+    </div>
+    <div id="micro"></div>
+  </div>
+
+  <div id="explain">
+    <div id="explainScroll">
+      <h2><span class="stepNo" id="expStepNo"></span><span id="expTitle"></span></h2>
+      <div class="section what"><h4>这一步做了什么</h4><div id="expWhat"></div></div>
+      <div class="section why"><h4>为什么这么设计(性能 / 显存 / 并发)</h4><div id="expWhy"></div></div>
+      <div class="section code"><h4>关键代码位置</h4><div id="expCode"></div></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div id="progressWrap"><div id="progressBar"></div></div>
+  <div id="timeline"></div>
+</footer>
+
+<script>
+"use strict";
+
+/* ============================================================
+ * 微观视图渲染辅助
+ * ============================================================ */
+const microEl = document.getElementById("micro");
+
+function tok(text, cls, delay) {
+  return `<span class="tok ${cls || ""}" style="animation-delay:${(delay || 0)}ms">${text}</span>`;
+}
+function toks(list, baseDelay, gap) {
+  return list.map((t, i) => tok(t[0], t[1], (baseDelay || 0) + i * (gap === undefined ? 45 : gap))).join("");
+}
+function row(label, inner) {
+  return `<div class="mrow"><span class="mlabel">${label}</span>${inner}</div>`;
+}
+function conf(heights, delay) {
+  const bars = heights.map((h, i) =>
+    `<i class="${h < 12 ? "low" : ""}" style="height:${h}px;animation-delay:${(delay || 0) + i * 60}ms"></i>`).join("");
+  return `<span class="confbar">${bars}</span>`;
+}
+function box(text, cls, delay) {
+  return `<span class="mbox ${cls || ""}" style="animation-delay:${(delay || 0)}ms">${text}</span>`;
+}
+function arrow(delay) { return `<span class="marrow" style="animation-delay:${(delay || 0)}ms">→</span>`; }
+function note(html) { return `<div class="mnote">${html}</div>`; }
+
+/* 示例批次:3 个请求,gamma=4(草稿 4 个,验证窗口 5) */
+const P = (n, base) => Array.from({length: n}, (_, i) => [`t${(base||0)+i}`, "prefix"]);
+
+/* ============================================================
+ * 步骤定义
+ * 每步: { phase, title, nodes:[激活节点], edges:[激活边(可带 :warm)],
+ *         micro() 微观视图 HTML, what/why HTML, code:[[位置,说明]] }
+ * ============================================================ */
+const PHASES = ["总览", "初始化", "Prefill · 请求首步", "Decode · 每步循环", "总结"];
+
+const steps = [
+
+/* ---------- 0 总览 ---------- */
+{
+  phase: 0,
+  title: "DSpark 是什么:块式草稿 + 弹性验证的投机解码",
+  nodes: ["n_sched","n_worker","n_draft","n_target","n_planner","n_verifier","n_inj","n_draftkv","n_targetkv"],
+  edges: [],
+  micro() {
+    return `<h3>登场角色(点击底部时间轴可随时跳转)</h3>
+      ${row("推测", toks([["锚点","anchor"],["d1","draft"],["d2","draft"],["d3","draft"],["d4","draft"]], 100))}
+      ${row("验证后", toks([["d1","accept"],["d2","accept"],["d3","accept"],["d4","reject"],["bonus","bonus"]], 400))}
+      ${note(`投机解码的基本逻辑:便宜的 <b>draft 模型</b>一次猜出 γ 个 token(上排),昂贵的<b>目标模型</b>一次前向并行验证(下排):
+        连续猜对的部分(绿)直接提交,第一个猜错处(红)由目标模型给出正确的 <b>bonus</b> token。
+        一步最多前进 γ+1 个 token,最少 1 个(bonus),<b>输出分布与目标模型逐 token 解码完全一致</b>。<br><br>
+        DSpark 的三个关键差异:① draft 不做 γ 次自回归小步,而是<b>一次块式前向</b>并行填 γ 个 [MASK];
+        ② draft 不重算 prompt,直接<b>复用目标模型中间层 hidden</b> 作为自己的 KV;
+        ③ 验证长度不固定,由<b>置信度 + SPS 代价表</b>按请求裁剪(ragged/compact 验证)。`)}`;
+  },
+  what: `<p>这一页先建立全局印象。上方架构图是本讲解贯穿使用的组件地图:<b>Scheduler</b> 驱动事件循环;<b>DSparkWorkerV2</b> 是投机解码的编排中枢;左右两个模型分别负责"猜"和"验";<b>VerifyPlanner</b> 决定每步验多少;<b>KV Injector</b> 负责把目标模型的语义灌进 draft 的 KV cache。</p>`,
+  why: `<p>DSpark 的所有设计都围绕一个事实:<span class="hlterm">decode 步是访存受限的</span>,目标模型一次前向验 10 个 token 的耗时远小于 10 次前向。因此值得用一个便宜的 draft 去"预支"若干 token,再让目标模型批量清账。而 DSpark 相比 EAGLE 系的改进,都在压低"预支"的成本和"清账"的浪费。</p>`,
+  code: [
+    ["python/sglang/srt/speculative/dspark_components/", "DSpark 核心实现目录"],
+    ["python/sglang/srt/speculative/spec_info.py:38", "SpeculativeAlgorithm.DSPARK 枚举"],
+  ],
+},
+
+/* ---------- 1 初始化 ---------- */
+{
+  phase: 1,
+  title: "Worker 装配:调度器把 DSparkWorkerV2 装成「模型 worker」",
+  nodes: ["n_sched","n_worker"],
+  edges: ["e_sched_worker"],
+  micro() {
+    return `<h3>启动时的一次性装配</h3>
+      ${box("--speculative-algorithm DSPARK", "warm", 0)}
+      ${arrow(200)}${box("_handle_dspark 参数校验<br><span style='color:var(--muted);font-size:11px'>强制 num_steps=1 · num_draft_tokens=γ+1</span>", "", 300)}
+      ${arrow(500)}${box("Scheduler.maybe_init_draft_worker", "", 600)}
+      ${arrow(800)}${box("self.model_worker = <span class='big'>draft_worker</span>", "hl", 900)}
+      ${note(`之后调度器每一步只调 <code>model_worker.forward_batch_generation(batch)</code>,
+        完全不感知内部是普通解码还是"draft→verify→accept"三段式。
+        DSparkWorkerV2 还通过 <code>__getattr__</code> 把未定义属性代理给 target worker,
+        所以调度器读 <code>max_total_num_tokens</code> 等字段时同样无感。`)}`;
+  },
+  what: `<p>服务启动时,若 <code>spec_algorithm</code> 非空,调度器把 <code>self.model_worker</code> 指向 <code>draft_worker</code>(即 <code>DSparkWorkerV2</code>)而不是普通的 <code>tp_worker</code>。DSparkWorkerV2 构造时会拉起一个独立的 draft ModelRunner、与目标模型<b>共享 embedding 和 lm_head</b>、并实例化后续所有组件(Planner / Injector / Proposer / VerifyExecutor)。</p>`,
+  why: `<ul>
+    <li><b>并发架构</b>:调度器的事件循环(组 batch、KV 分配、结果处理)对所有算法完全复用,投机解码的复杂性被封装在 worker 内,两者可以独立演化。</li>
+    <li><b>显存</b>:draft 与目标共享 embed/lm_head 权重(<code>attach_shared_modules</code>),几十亿参数的词表矩阵只存一份。</li>
+    <li><b>校验前置</b>:<code>_handle_dspark</code> 在启动期就把非法组合(PP&gt;1、return_logprob 等)拒掉,而不是运行时才炸。</li>
+  </ul>`,
+  code: [
+    ["managers/scheduler.py:860-864", "model_worker 分发:spec 开启时指向 draft_worker"],
+    ["speculative/dspark_components/dspark_worker_v2.py:64-252", "DSparkWorkerV2.__init__:装配全部组件"],
+    ["speculative/dspark_components/dspark_worker_v2.py:148-151", "attach_shared_modules:共享 embed/lm_head"],
+    ["arg_groups/speculative_hook.py:276", "_handle_dspark:参数校验与派生"],
+  ],
+},
+
+/* ---------- 2 Prefill:分发 ---------- */
+{
+  phase: 2,
+  title: "新请求到达:run_batch → worker,按 forward_mode 分发",
+  nodes: ["n_sched","n_worker"],
+  edges: ["e_sched_worker"],
+  micro() {
+    return `<h3>每一步的入口分发</h3>
+      ${box("Scheduler.run_batch", "", 0)}${arrow(150)}
+      ${box("_forward_isolation<br><span style='color:var(--muted);font-size:11px'>batch 字段快照/恢复</span>", "", 250)}${arrow(400)}
+      ${box("worker.forward_batch_generation", "hl", 500)}
+      <div class="mrow" style="margin-top:14px">
+        ${box("forward_mode = EXTEND ?", "warm", 800)}
+      </div>
+      <div class="mrow">
+        ${box("是 → _forward_prefill(本阶段)", "hl", 1050)}
+        ${box("否 → _forward_decode(下一阶段)", "", 1250)}
+      </div>
+      ${note(`新请求的第一步是 prefill(extend 模式):要把整段 prompt 过一遍目标模型。
+        注意 <code>note_non_decode_step()</code>:prefill 会打断置信度的跨步流水(overlap 模式下置信度滞后 2 步中继),必须显式通知 Planner 清空节奏。`)}`;
+  },
+  what: `<p>调度器组好 batch 后进入 <code>run_batch</code> 的 spec-v2 分支:在 <code>_forward_isolation</code> 上下文中同步调用 worker。worker 检查 <code>batch.forward_mode</code>:extend(prefill)走 <code>_forward_prefill</code>,decode 走 <code>_forward_decode</code>。</p>`,
+  why: `<ul>
+    <li><b>并发安全</b>:<code>_forward_isolation</code> 对 ScheduleBatch 做快照/恢复,允许 worker 在前向途中<b>就地篡改</b> batch 字段(后面 verify 时会临时换掉 <code>out_cache_loc</code>、加长 <code>seq_lens</code>)而不污染调度器状态;只有白名单字段(<code>spec_info</code>、<code>new_seq_lens</code>)带到下一步。</li>
+    <li><b>性能(overlap 模式)</b>:另一条分支会传 <code>on_publish</code> 回调,让 worker 在 verify 出结果、收尾还没跑完时就发布 seq_lens,下一步的 batch 组装得以与本步尾部 GPU 工作重叠,隐藏 CPU 调度开销。</li>
+  </ul>`,
+  code: [
+    ["managers/scheduler.py:3434-3448", "非 overlap spec 分支:同步调用 + 状态回写"],
+    ["managers/scheduler.py:3334-3372", "overlap 分支:on_publish 中继"],
+    ["dspark_components/dspark_worker_v2.py:357-372", "forward_batch_generation:prefill/decode 分发"],
+  ],
+},
+
+/* ---------- 3 Prefill:目标前向+捕获 ---------- */
+{
+  phase: 2,
+  title: "Prefill:目标模型前向,途中逐层捕获 aux hidden",
+  nodes: ["n_worker","n_target","n_targetkv"],
+  edges: ["e_worker_target","e_target_targetkv"],
+  micro() {
+    const layers = [];
+    const capture = [14, 29, 44];
+    for (let i = 0; i < 8; i++) {
+      const lid = [2, 9, 14, 22, 29, 37, 44, 52][i];
+      const isCap = capture.includes(lid);
+      layers.push([`L${lid}`, isCap ? "hid glow" : "prefix"]);
+    }
+    return `<h3>一次前向,两份产出</h3>
+      ${row("prompt", toks(P(8), 0))}
+      ${row("逐层前向", toks(layers, 350, 90) + `<span class="mlabel" style="min-width:0;margin-left:8px">(高亮 = dspark_layers_to_capture)</span>`)}
+      ${row("产出 ①", toks([["h₁","hid"],["h₂","hid"],["h₃","hid"],["h₄","hid"],["h₅","hid"],["h₆","hid"],["h₇","hid"],["h₈","hid"]], 1200) + `<span class="mlabel" style="min-width:0;margin-left:8px">aux hidden(逐 token,多层聚合)</span>`)}
+      ${row("产出 ②", tok("b₀", "bonus", 1650) + `<span class="mlabel" style="min-width:0;margin-left:8px">采样出的第一个新 token(锚点)</span>`)}
+      ${note(`worker 以 <code>CaptureHiddenMode.FULL</code> 调目标前向;DeepSeek-V4 在逐层循环里,命中捕获层就把"该层完成后的 hidden"旁路存下。
+        捕获需要看到每层完整输出,所以此时<b>显式跳过 TBO</b>(two-batch-overlap)——一个纯性能路径为正确性让路。`)}`;
+  },
+  what: `<p>prefill 就是普通的目标模型前向(顺带采出第一个 token <code>b₀</code>),但带 <code>capture_hidden_mode=FULL</code>:目标模型在逐层循环中,把 <code>dspark_layers_to_capture</code> 指定层的 hidden state 旁路捕获、聚合成每个 prompt token 一条的 aux hidden。捕获哪些层由 draft checkpoint 的配置决定,启动时经 <code>set_dspark_layers_to_capture</code> 注入。</p>`,
+  why: `<ul>
+    <li><b>核心动机</b>:draft 模型层数极少,自己没有能力"理解"长 prompt。与其让它重算,不如直接<b>白嫖目标模型的中间层语义</b>(下一步注入 draft KV),draft 侧 prefill 成本≈0。</li>
+    <li><b>代价与取舍</b>:目标前向多带一份 <code>[prompt_len, hidden]</code> 的显存和一次逐层旁路拷贝;且捕获与 TBO 互斥(TBO 的重叠执行暴露不出每层的完成态 hidden),prefill 吞吐略降——换 decode 阶段的整体加速。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_worker_v2.py:384-397", "_forward_prefill:FULL 捕获 + 判空报错"],
+    ["models/deepseek_v4.py:2337-2344", "逐层循环内的捕获点(hc_post 后取 hidden)"],
+    ["models/deepseek_v4.py:2302-2306", "捕获时跳过 TBO 的注释与判断"],
+    ["model_runner_components/attention_backend_setup.py:56-57", "启动时 set_dspark_layers_to_capture"],
+  ],
+},
+
+/* ---------- 4 Prefill:注入 draft KV ---------- */
+{
+  phase: 2,
+  title: "Prefill:把目标 hidden 投影注入 draft 的 KV cache",
+  nodes: ["n_worker","n_inj","n_draftkv"],
+  edges: ["e_target_inj","e_inj_draftkv"],
+  micro() {
+    return `<h3>TargetHiddenKvInjector.inject_target_hidden</h3>
+      ${row("aux hidden", toks([["h₁","hid"],["h₂","hid"],["h₃","hid"],["h₄","hid"],["h₅","hid"],["h₆","hid"],["h₇","hid"],["h₈","hid"]], 0))}
+      <div class="mrow">${box("write_target_hidden_kv<br><span style='color:var(--muted);font-size:11px'>draft 侧投影:hidden → K/V(融合 norm+rope kernel)</span>", "hl", 400)}</div>
+      ${row("draft KV", toks([["k₁v₁","accept"],["k₂v₂","accept"],["k₃v₃","accept"],["k₄v₄","accept"],["k₅v₅","accept"],["k₆v₆","accept"],["k₇v₇","accept"],["k₈v₈","accept"]], 800))}
+      ${row("", `<span class="mlabel" style="min-width:0">cache_loc 直接复用目标侧 out_cache_loc(同一套 req_to_token 页表)</span>`)}
+      ${note(`注入完成后立刻 <code>logits_output.hidden_states = None</code> —— aux hidden 是大张量,不能被 batch_result 拖着活到下一步。<br>
+        MLA 路径(<code>_inject_mla</code>)会先把 full 槽位翻译成 SWA 槽位再写入,draft 的注意力是滑窗的,KV 池比目标侧小得多。`)}`;
+  },
+  what: `<p><code>inject_target_hidden</code> 把捕获的 aux hidden 交给 draft 模型的 <code>write_target_hidden_kv</code>:用 draft 自己的投影权重把 hidden 变换成 K/V,直接写进 draft KV pool 中该请求对应的槽位。位置(positions)按 prompt 逐 token 计算,cache 槽位直接复用目标侧的 <code>out_cache_loc</code> 编号。</p>`,
+  why: `<ul>
+    <li><b>性能</b>:这等价于 draft 免费获得了整段 prompt 的编码——后续 decode 时 draft 的注意力直接读这些 KV,不需要任何 prompt 前向。</li>
+    <li><b>显存/工程</b>:draft KV pool 与目标共用 <code>req_to_token</code> 页表(worker 的 <code>alloc_memory_pool</code> 原样转发目标的池配置),省掉一套独立页表管理;逻辑槽位一一对应,注入就是"按同一地址写另一个池"。</li>
+    <li><b>显存回收</b>:注入后立即置 None 释放 aux hidden 引用,避免 <code>[prompt_len, hidden]</code> 级别的张量跨步存活。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_worker_v2.py:405-421", "计算 positions → inject → 置 None"],
+    ["dspark_components/dspark_kv_inject.py:31-78", "inject_target_hidden:搬运与分发"],
+    ["dspark_components/dspark_kv_inject.py:80-103", "_inject_mla:full→SWA 槽位翻译"],
+    ["model_executor/pool_configurator.py:153", "KV 池 cell_size 为 draft KV 留量"],
+  ],
+},
+
+/* ---------- 5 Prefill:bonus 闭环 ---------- */
+{
+  phase: 2,
+  title: "Prefill 收尾:首个 token 作为锚点存入 spec_info",
+  nodes: ["n_worker","n_sched"],
+  edges: ["e_worker_sched"],
+  micro() {
+    return `<h3>跨步状态的闭环</h3>
+      ${row("首个 token", tok("b₀", "bonus", 0))}
+      <div class="mrow">${box("make_next_draft_input(bonus_tokens=b₀, new_seq_lens)", "hl", 300)}</div>
+      <div class="mrow">${arrow(600)}${box("GenerationBatchResult.next_draft_input", "", 700)}
+      ${arrow(900)}${box("batch.spec_info(调度器回写)", "warm", 1000)}</div>
+      ${row("此刻序列", toks(P(8).concat([["b₀","bonus"]]), 1300))}
+      ${note(`prefill 结束。<b>b₀ 有双重身份</b>:它既是流式返回给用户的第一个 token,
+        也是下一步 decode 中 draft 块的"锚点"(anchor)——draft 将从它出发猜后面 γ 个 token。
+        <code>DFlashDraftInputV2</code> 是 DFLASH 家族共用的跨步载体,DSpark 直接复用。`)}`;
+  },
+  what: `<p>worker 把采样出的 <code>b₀</code> 打包进 <code>make_next_draft_input</code>(得到 <code>DFlashDraftInputV2</code>),挂在返回值的 <code>next_draft_input</code> 上;调度器在 <code>run_batch</code> 尾部执行 <code>batch.spec_info = batch_result.next_draft_input</code> 完成闭环。新请求的首步到此完成。</p>`,
+  why: `<ul>
+    <li><b>并发</b>:跨步状态(bonus token、seq_lens)全部走显式的 <code>spec_info</code> 通道,而不是 worker 内部藏状态——这让 <code>_forward_isolation</code> 的快照/恢复语义能成立,也让 overlap 模式下"下一步在上一步收尾前就开始组 batch"成为可能(状态是张量句柄,GPU 上按流序自然就绪)。</li>
+    <li><b>复用</b>:DSpark 与 DFLASH 共用 <code>DFlashDraftInputV2</code>(<code>is_dflash_family()</code>),整套 future_map 中继、cuda graph 占位逻辑无需重写。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_worker_v2.py:423-427", "make_next_draft_input(bonus, seq_lens)"],
+    ["managers/scheduler.py:3442-3448", "spec_info / seq_lens 回写"],
+    ["speculative/dflash_info_v2.py:35", "DFlashDraftInputV2:跨步状态载体"],
+  ],
+},
+
+/* ---------- 6 Decode:verify window ---------- */
+{
+  phase: 3,
+  title: "Decode ①:为验证窗口分配 γ+1 个 KV 槽位",
+  nodes: ["n_worker","n_targetkv","n_draftkv"],
+  edges: [],
+  micro() {
+    const slots = [["s₀","slot"],["s₁","slot"],["s₂","slot"],["s₃","slot"],["s₄","slot"]];
+    return `<h3>alloc_verify_window(γ=4,窗口=γ+1=5)</h3>
+      ${row("请求 A(len 8)", toks(P(8), 0, 25) + toks(slots, 500, 70))}
+      ${row("请求 B(len 5)", toks(P(5), 100, 25) + toks(slots, 700, 70))}
+      ${row("请求 C(len 11)", toks(P(11), 200, 25) + toks(slots, 900, 70))}
+      ${note(`虚线格 = 本步新分配的验证窗口槽位:对每个请求,在页表 <code>req_to_token</code> 的
+        <code>[prefix_len, prefix_len+5)</code> 区间查出物理 cache 槽位(<code>assign_extend_cache_locs_func</code>,纯 GPU kernel)。
+        <b>draft 用前 γ=4 个槽,target verify 用全部 5 个</b>,同一个窗口两阶段复用。`)}`;
+  },
+  what: `<p><code>_forward_decode</code> 开场先调 <code>alloc_verify_window</code>:对 batch 里每个请求,从页表中取出验证窗口(γ+1 个连续逻辑位置)对应的物理 KV 槽位,连同 <code>positions_2d = prefix_lens + [0..γ]</code> 一起打包成 <code>VerifyWindow</code>。</p>`,
+  why: `<ul>
+    <li><b>性能</b>:调度器组 batch 时已按"每请求最多 γ+1 个新 token"预留了页表项,这里只是一次 GPU 查表 kernel,<b>零 host 往返</b>——decode 步的 CPU 时间极其金贵。</li>
+    <li><b>复用</b>:draft 块前向(写前 4 槽)和 target verify(写全部 5 槽)共享这一个窗口,避免两次分配、两套地址。被拒 token 的槽位随后由调度器按 <code>new_seq_lens</code> 回收页表即可,无需擦除数据。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_planner.py:832-858", "alloc_verify_window:查页表 + 组 VerifyWindow"],
+    ["dspark_components/dspark_worker_v2.py:509-516", "_forward_decode 中的调用点"],
+  ],
+},
+
+/* ---------- 7 Decode:构造 draft 块 ---------- */
+{
+  phase: 3,
+  title: "Decode ②:构造 draft 块 = 锚点 + (γ−1) 个 [MASK]",
+  nodes: ["n_worker","n_draft"],
+  edges: ["e_worker_draft"],
+  micro() {
+    return `<h3>块式输入的构造(每请求 γ=4 格)</h3>
+      ${row("请求 A", toks([["b₀","anchor"],["M","mask"],["M","mask"],["M","mask"]], 0, 120))}
+      ${row("请求 B", toks([["b₀","anchor"],["M","mask"],["M","mask"],["M","mask"]], 150, 120))}
+      ${row("请求 C", toks([["b₀","anchor"],["M","mask"],["M","mask"],["M","mask"]], 300, 120))}
+      ${note(`<code>draft_block_ids</code> 先整块填 <code>mask_token_id</code>,再把第 0 列换成上一步的 bonus token(锚点)。
+        [MASK] 的 id 来自 draft checkpoint 配置(<code>mask_token_id</code> / <code>dspark_noise_token_id</code>),
+        启动时已校验它落在目标词表内——因为 embedding 是共享目标模型的。<br>
+        位置与 cache 槽位取自上一步 VerifyWindow 的<b>前 γ 列</b>。`)}`;
+  },
+  what: `<p>为每个请求构造一个宽 γ 的输入块:第 0 位是上一步的 bonus token(锚点 <code>b₀</code>),其余 γ−1 位全部填特殊的 <code>[MASK]</code> token。这个块将作为一次定长 extend 喂给 draft 模型。</p>`,
+  why: `<ul>
+    <li><b>建模思想</b>:这是"非自回归填空"。draft 模型被训练成:给定上文 KV + 锚点,一次前向就为每个 [MASK] 位置产出足够好的表征。猜测质量略逊于逐 token 自回归,但成本从 γ 次前向降到 1 次——投机解码里 draft 只需"够好",错了有验证兜底,<b>正确性永远由目标模型保证</b>。</li>
+    <li><b>形状稳定</b>:块宽恒为 γ,batch 内所有请求形状一致,这是后面整条链能进 cuda graph 的前提。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_draft.py:355-360", "mask 块构造 + 锚点写入第 0 列"],
+    ["dspark_components/dspark_config.py:109-118", "mask_token_id 的解析与词表校验"],
+    ["arg_groups/speculative_hook.py:327-340", "强制 num_steps=1 / topk=1"],
+  ],
+},
+
+/* ---------- 8 Decode:draft 前向 ---------- */
+{
+  phase: 3,
+  title: "Decode ③:draft 一次块式前向(整张 cuda graph)",
+  nodes: ["n_draft","n_draftkv"],
+  edges: ["e_draft_draftkv"],
+  micro() {
+    return `<h3>一次前向,γ 个位置并行出 hidden</h3>
+      <div class="gframe" data-label="draft cuda graph(decode 每步回放)">
+        ${row("输入块", toks([["b₀","anchor"],["M","mask"],["M","mask"],["M","mask"]], 0, 100))}
+        <div class="mrow">${box("Draft 前向 ×1<br><span style='color:var(--muted);font-size:11px'>ForwardMode.TARGET_VERIFY(定长 extend)· 注意力读 draft KV(含 prefill 注入的上下文)</span>", "hl", 500)}</div>
+        ${row("hidden", toks([["h₁","hid"],["h₂","hid"],["h₃","hid"],["h₄","hid"]], 900, 100))}
+      </div>
+      ${note(`对比:EAGLE 系每步要跑 γ 次 draft 小前向(每次 bs 个 token);
+        DSpark 一次跑 bs×γ 个 token —— kernel 启动、注意力元数据、all-reduce 都只发生一次。
+        借用 <code>TARGET_VERIFY</code> 模式是因为它就是现成的"定长 extend + 完整 cuda graph 支持"通路
+        (源码中有注明此复用的 FIXME 注释)。`)}`;
+  },
+  what: `<p>把 mask 块以 <code>ForwardMode.TARGET_VERIFY</code>(定长 extend)喂给 draft ModelRunner,一次前向并行产出 γ 个位置的 hidden(<code>draft_hidden_3d: [bs, γ, hidden]</code>)。draft 的注意力读的是自己的 KV pool——里面已有 prefill 时注入的目标模型语义。</p>`,
+  why: `<ul>
+    <li><b>性能(核心收益)</b>:GPU 上一次 <code>bs×γ</code> token 的前向远比 γ 次 <code>bs</code> token 便宜——固定开销(launch、元数据构建、通信)摊薄 γ 倍;这正是 DSpark 强制 <code>speculative_num_steps == 1</code> 的原因。</li>
+    <li><b>并发</b>:定长形状使整个前向可被 cuda graph 捕获;dsv4(MoE)draft 在 DP-attention 下还要做 <code>global_num_tokens</code> 同步元数据填充,保证各 DP rank 同构进 graph。</li>
+    <li><b>显存</b>:draft 前向 <code>capture_hidden_mode=NULL</code>,不捕获任何中间态。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_draft.py:377-394", "_run_forward:TARGET_VERIFY 定长前向"],
+    ["speculative/spec_info.py:222-228", "TARGET_VERIFY 复用的 FIXME 说明"],
+    ["dspark_components/dspark_draft.py:407-426", "_fill_dp_moe_sync_metadata:DP 同步元数据"],
+  ],
+},
+
+/* ---------- 9 Decode:Markov 采样 ---------- */
+{
+  phase: 3,
+  title: "Decode ④:Markov 头块内自回归采样 + 置信度",
+  nodes: ["n_draft"],
+  edges: [],
+  micro() {
+    return `<h3>hidden → 具体 token(折叠在 graph 尾部)</h3>
+      <div class="gframe" data-label="graph 尾部 capture_tail_hook:DsparkDraftSampler">
+        ${row("hidden", toks([["h₁","hid"],["h₂","hid"],["h₃","hid"],["h₄","hid"]], 0, 100))}
+        <div class="mrow">${box("Markov 头逐步修正<br><span style='color:var(--muted);font-size:11px'>d₁ 采出后参与 d₂ 的 logits 修正…(低秩链式)</span>", "hl", 400)}</div>
+        ${row("draft tokens", toks([["d₁","draft"],["d₂","draft"],["d₃","draft"],["d₄","draft"]], 900, 130))}
+        ${row("置信度", conf([26,22,15,8], 1400) + `<span class="mlabel" style="min-width:0;margin-left:10px">每位置一个标量,后面用来定验证长度</span>`)}
+      </div>
+      ${note(`mask 位的 hidden 是"并行、彼此独立"的预测;<b>Markov 头</b>(vanilla / gated / rnn 三种)
+        用低秩权重做块内链式修正:前一个采出的 token 会影响后一个位置的 logits,弥补非自回归的短板。
+        整个"base logits → 逐步采样 → 置信度"链作为 <code>capture_tail_hook</code> 折进 draft 的 cuda graph,
+        token 直接落在<b>固定输出缓冲</b>里,graph 回放结束即拿到结果,eager 路径只在无法进 graph 时兜底。`)}`;
+  },
+  what: `<p>hidden 经共享 lm_head 得到 base logits,再由 Markov 头做块内自回归修正、逐位置采样出 γ 个草稿 token,同时算出每位置的置信度(confidence)。快路径下这一整段已折进 draft cuda graph 尾部,worker 只做零拷贝切片(<code>draft_sampler.out[:bs*γ]</code>)。</p>`,
+  why: `<ul>
+    <li><b>性能</b>:decode 步 GPU 工作都很小,CPU 发射开销占比极高;把"前向+采样+置信度"整体折进一张 graph,消掉每步几十次 kernel launch。固定输出缓冲是 cuda graph 的硬要求(graph 内地址必须稳定),顺带避免每步分配。</li>
+    <li><b>建模</b>:Markov 修正让块内 token 有了因果链,显著提升 d₂/d₃/d₄ 的命中率;三种头(vanilla/gated/rnn)是质量-成本的不同档位,由 checkpoint 配置选择。</li>
+    <li><b>为下一步铺垫</b>:置信度在这里"顺产"出来,不需要额外前向。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_draft.py:274-307", "propose:折叠快路径 vs eager 兜底"],
+    ["models/dspark.py:67-289", "VanillaMarkov / GatedMarkovHead / RNNHead / ConfidenceHead"],
+    ["dspark_components/dspark_worker_v2.py:307-314", "init_cuda_graphs:sampler 挂 capture_tail_hook"],
+    ["kernels/dspark_draft_model.py:17", "SampleStepTokens:逐步采样 kernel"],
+  ],
+},
+
+/* ---------- 10 Decode:SPS 预算 ---------- */
+{
+  phase: 3,
+  title: "Decode ⑤:SPS 代价表 → 本步的 verify token 预算",
+  nodes: ["n_planner"],
+  edges: ["e_worker_planner"],
+  micro() {
+    return `<h3>「验一个 token 值不值」的经济账</h3>
+      <div class="mrow">
+        ${box("置信度<br><span style='color:var(--muted);font-size:11px'>存活概率:P(前 k 个全对)</span>", "", 0)}
+        <span class="marrow" style="animation-delay:250ms">＋</span>
+        ${box("SPS 代价表<br><span style='color:var(--muted);font-size:11px'>离线 profile:验 N 个 token 的耗时</span>", "", 350)}
+        ${arrow(600)}
+        ${box("边际收益 ≥ 边际成本?", "warm", 700)}
+        ${arrow(950)}
+        ${box("本步预算 = <span class='big'>10</span> tokens", "hl", 1050)}
+      </div>
+      ${note(`预算最大化的是<b>吞吐期望</b>:多验一个 token,收益是"它存活并被提交的概率×1 个 token",
+        成本是查表得到的边际验证耗时。置信度低时,后面的 token 几乎必被拒,验它纯属浪费。<br><br>
+        <b>overlap 模式的关键细节</b>:预算不在本步现算——那需要 D2H 同步置信度、CPU 查表,会卡住 GPU。
+        它由上一步的 <code>on_publish</code> 把置信度中继给调度器,在<b>组 batch 阶段</b>(GPU 空转期)提前算好塞进
+        <code>draft_input.verify_token_budget</code>。代价:预算基于滞后 2 步的置信度(可配)。`)}`;
+  },
+  what: `<p><code>resolve_verify_token_budget</code> 决定"这一步全批次总共验多少 token":用每请求的置信度(转成存活概率)和离线 profile 的 SPS 代价表(验 N 个 token 的实际耗时曲线),算边际收益/成本的平衡点。非 overlap 模式现算;overlap 模式直接取上一步预计算好的值。</p>`,
+  why: `<ul>
+    <li><b>性能(本质)</b>:target verify 是整条链最贵的一步,代价≈验证 token 总数。全验(static)在低置信时浪费大量算力验注定被拒的 token;预算机制把 verify 的 FLOPs 裁到"值得验"的量。</li>
+    <li><b>并发</b>:overlap 下把这段 host 计算(D2H 同步+查表)挪出关键路径,塞进调度器的 batch 组装期,GPU 不停轮;换来的妥协是预算基于滞后 <code>SGLANG_DSPARK_CONFIDENCE_RELAY_LAG_STEPS=2</code> 步的置信度——置信度是慢变量,滞后可接受。</li>
+    <li><b>可运维</b>:SPS 表由 <code>sglang.benchmark.dspark_sps_profiler</code> 离线生成,按硬件/并行度分发,不在线拟合。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_planner.py:362-380", "resolve_verify_token_budget:overlap/同步双路径"],
+    ["dspark_components/dspark_planner.py:942-1008", "compute_verify_token_budget:边际收益计算"],
+    ["dspark_components/dspark_sps.py:14-62", "SpsCostTable:离线代价表结构"],
+    ["managers/scheduler.py:3338-3339", "_confidence_budget_prepare:组 batch 期预计算"],
+  ],
+},
+
+/* ---------- 11 Decode:ragged 布局 ---------- */
+{
+  phase: 3,
+  title: "Decode ⑥:schedule_layout —— 按置信度把预算切成每请求 verify_lens",
+  nodes: ["n_planner","n_verifier"],
+  edges: ["e_planner_verifier"],
+  micro() {
+    const W = (n, total, d) => {
+      const cells = [];
+      cells.push(["b₀","anchor"]);
+      for (let i = 1; i < total; i++) cells.push([`d${i}`, i < n ? "draft" : "hole"]);
+      return toks(cells, d, 90);
+    };
+    return `<h3>预算 10 tokens 的分配(γ+1=5 为上限)</h3>
+      ${row("A 高置信", conf([26,24,20,16], 0) + `<span style="width:14px"></span>` + W(5, 5, 200) + box("verify_len=5", "hl", 700))}
+      ${row("B 中置信", conf([22,14,7,4], 150) + `<span style="width:14px"></span>` + W(3, 5, 400) + box("verify_len=3", "hl", 850))}
+      ${row("C 低置信", conf([12,5,3,2], 300) + `<span style="width:14px"></span>` + W(2, 5, 600) + box("verify_len=2", "hl", 1000))}
+      ${note(`<code>ScheduleVerifyLensTopk</code> kernel 把全批次所有(请求, 位置)按置信度排序,
+        预算内的 top-k 保留,得到每请求的 <code>verify_lens</code>(点状格 = 被裁掉、连验都不验的位置)。
+        产出 <code>RaggedVerifyLayout</code>。<br><br>
+        <b>cuda graph 相容性护栏</b>:裁剪后的总 token 数会向上对齐(<code>round_up_grid</code>)到已捕获的
+        token 档位;若超出捕获网格,直接返回 None 回退全验——保证"省算力"永远不会把执行踢出 graph 快路径而得不偿失。`)}`;
+  },
+  what: `<p><code>schedule_layout</code> 把全批次预算按置信度 top-k 切分成每请求的验证长度 <code>verify_lens</code>(锚点位必验,故每请求 ≥1),产出 <code>RaggedVerifyLayout</code>(含每请求长度、累计偏移、目标 graph token 数)。<code>should_run_compact</code> 据此决定走 compact 压紧路径还是全验路径。</p>`,
+  why: `<ul>
+    <li><b>公平 vs 效率</b>:预算不是均分,而是全批次统一按置信度竞争——高置信请求多验(可能一步收 5 个 token),低置信请求少验(反正也保不住),整体吞吐最大化。</li>
+    <li><b>并发(DP)</b>:DP-attention 下各 rank 的布局要用 <code>dp_tier_num_tokens</code>(全局聚合的 token 档位)对齐,否则不同 rank 进不同 graph 会死锁在集合通信上。</li>
+    <li><b>verify-all 快路径</b>:SPS 表未配置时布局退化为常量,按 (bs, tier) 缓存,省掉每步的调度 kernel 和 host 往返。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_planner.py:408-511", "schedule_layout:调度 + graph 档位对齐"],
+    ["kernels/dspark_schedule.py:19", "ScheduleVerifyLensTopk:top-k 调度 kernel"],
+    ["speculative/ragged_verify.py:46", "RaggedVerifyLayout 数据结构"],
+    ["dspark_components/dspark_worker_v2.py:542-565", "worker 中的预算→布局→模式决策"],
+  ],
+},
+
+/* ---------- 12 Decode:压紧 ---------- */
+{
+  phase: 3,
+  title: "Decode ⑦:压紧(compact)—— 去掉空洞,拼成连续 token 流",
+  nodes: ["n_verifier"],
+  edges: [],
+  micro() {
+    return `<h3>BuildRaggedVerifyWindow:strided → compact</h3>
+      ${row("A(验5)", toks([["b₀","anchor"],["d₁","draft"],["d₂","draft"],["d₃","draft"],["d₄","draft"]], 0, 60))}
+      ${row("B(验3)", toks([["b₀","anchor"],["d₁","draft"],["d₂","draft"],["·","hole"],["·","hole"]], 120, 60))}
+      ${row("C(验2)", toks([["b₀","anchor"],["d₁","draft"],["·","hole"],["·","hole"],["·","hole"]], 240, 60))}
+      <div class="mrow" style="margin:14px 0 6px">${box("压紧 ↓ 连 positions / cache_loc / 页表视图一起压", "warm", 700)}</div>
+      ${row("compact 流", toks([["A:b₀","anchor"],["A:d₁","draft"],["A:d₂","draft"],["A:d₃","draft"],["A:d₄","draft"],["B:b₀","anchor"],["B:d₁","draft"],["B:d₂","draft"],["C:b₀","anchor"],["C:d₁","draft"]], 1000, 70) + box("10 tokens", "hl", 1800))}
+      ${note(`目标模型接下来只对这 10 个 token 做前向 —— 而不是 static 模式的 bs×(γ+1)=15 个。
+        被裁掉的位置连 attention、MoE 路由的算力都不花。这就是"弹性验证"真正省钱的地方。`)}`;
+  },
+  what: `<p><code>BuildRaggedVerifyWindow</code> kernel 按 layout 把每请求前 <code>verify_lens[i]</code> 个候选 token(锚点+草稿)压成一条无空洞的连续流,positions、cache_loc 同步压紧,交给目标模型。</p>`,
+  why: `<ul>
+    <li><b>性能</b>:压紧后目标前向的 token 数 = 实际要验的数量。示例里省 33%,低置信场景下可省得更多——这直接线性折算成 verify 阶段的耗时下降。</li>
+    <li><b>为什么不直接跳过(masking)</b>:带洞的规则形状虽然简单,但 attention/MoE kernel 仍要为洞位付出算力;压紧把浪费彻底消除,代价只是两个轻量的重排 kernel(压紧+散射)。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_verify.py:364-373", "run_compact:构建压紧窗口"],
+    ["kernels/dspark_verify_window.py:20-260", "BuildRaggedVerifyWindow / CompactVerifyIds"],
+  ],
+},
+
+/* ---------- 13 Decode:target verify ---------- */
+{
+  phase: 3,
+  title: "Decode ⑧:目标模型 target_verify 前向(token-bucket cuda graph)",
+  nodes: ["n_verifier","n_target","n_targetkv"],
+  edges: ["e_verifier_target","e_target_targetkv"],
+  micro() {
+    return `<h3>一次前向验完全批次候选</h3>
+      <div class="gframe" data-label="target verify cuda graph(按 token 数分档捕获:8 / 16 / 32 …)">
+        ${row("compact 流", toks([["A:b₀","anchor"],["A:d₁","draft"],["A:d₂","draft"],["A:d₃","draft"],["A:d₄","draft"],["B:b₀","anchor"],["B:d₁","draft"],["B:d₂","draft"],["C:b₀","anchor"],["C:d₁","draft"]], 0, 50))}
+        <div class="mrow">${box("目标模型前向 ×1<br><span style='color:var(--muted);font-size:11px'>batch.out_cache_loc 已被换成压紧槽位;attention 自动含块内因果关系</span>", "hl", 700)}</div>
+        ${row("产出", toks([["logits","hid"],["hidden","hid"]], 1200, 120) + `<span class="mlabel" style="min-width:0;margin-left:8px">每个验证位置的下一 token 分布 + hidden(供 KV 注入)</span>`)}
+      </div>
+      ${note(`10 个 token 落在预捕获的 16-token 档 graph 上回放(不足处 pad)。
+        <b>档位化(bucket)是让"动态形状"与"cuda graph 要求静态形状"共存的标准手法</b>:
+        上一步 layout 已保证总 token 数对齐到某个档位,所以任意 ragged 布局都能命中一张已捕获的 graph。<br>
+        这一步同样带 <code>CaptureHiddenMode.FULL</code> —— 验证位置的 hidden 待会儿要注入 draft KV(和 prefill 一样的白嫖循环)。`)}`;
+  },
+  what: `<p><code>_run_ragged</code> 构造 <code>DFlashVerifyInput</code>(携带 ragged layout),把 <code>batch.out_cache_loc</code> 临时替换成压紧槽位、<code>seq_lens</code> 临时加上各自的 verify_lens,然后跑目标模型一次 target_verify 前向,得到每个验证位置的 logits 和 hidden。</p>`,
+  why: `<ul>
+    <li><b>性能</b>:这就是投机解码的"批量清账"——γ+1 个位置的验证合并成 1 次前向,访存受限的 decode 场景下耗时接近验 1 个 token。</li>
+    <li><b>并发</b>:token-bucket 键控的 graph(而非按 bs 键控)让不同 ragged 形状复用同一批捕获;DSpark 是唯一携带 <code>RaggedVerifyLayout</code> 的算法,decode_cuda_graph_runner 为它专门开了这套档位。</li>
+    <li><b>隔离</b>:对 batch 的就地篡改(out_cache_loc / seq_lens)由第 2 步的 <code>_forward_isolation</code> 快照兜底,前向结束自动还原。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_verify.py:315-350", "_run_ragged:换 out_cache_loc、临时加 seq_lens"],
+    ["dspark_components/dspark_verify.py:376-381", "run_compact 中的调用"],
+    ["model_executor/runner/decode_cuda_graph_runner.py:462-470", "DSpark 的 graph 档位特判"],
+    ["speculative/spec_info.py:130-134", "carries_ragged_verify_layout:能力声明"],
+  ],
+},
+
+/* ---------- 14 Decode:scatter ---------- */
+{
+  phase: 3,
+  title: "Decode ⑨:散射(scatter)回定步长形状",
+  nodes: ["n_verifier"],
+  edges: [],
+  micro() {
+    return `<h3>ScatterCompactToStrided:compact → strided</h3>
+      ${row("compact 流", toks([["A₀","hid"],["A₁","hid"],["A₂","hid"],["A₃","hid"],["A₄","hid"],["B₀","hid"],["B₁","hid"],["B₂","hid"],["C₀","hid"],["C₁","hid"]], 0, 50))}
+      <div class="mrow" style="margin:12px 0 6px">${box("散射 ↓ 空洞补 0", "warm", 600)}</div>
+      ${row("A", toks([["A₀","hid"],["A₁","hid"],["A₂","hid"],["A₃","hid"],["A₄","hid"]], 850, 60))}
+      ${row("B", toks([["B₀","hid"],["B₁","hid"],["B₂","hid"],["0","hole"],["0","hole"]], 1000, 60))}
+      ${row("C", toks([["C₀","hid"],["C₁","hid"],["0","hole"],["0","hole"],["0","hole"]], 1150, 60))}
+      ${note(`logits 和 hidden 都散射回 <code>bs×(γ+1)</code> 的定步长(strided)布局。
+        看似"白做一来一回",实则是接口设计:后续 accept / finalize / out-token / KV-commit
+        全部 kernel 都按 <code>req_idx × stride + pos</code> 定步长寻址编写,
+        与 static 全验模式<b>完全共用同一套 kernel</b>,且形状固定可折进 graph。
+        一次 scatter 拷贝的成本远小于维护两套 ragged 寻址 kernel 的复杂度。<br>
+        折叠路径下这步已在 verify graph 内完成,worker 直接读 epilogue 的固定缓冲。`)}`;
+  },
+  what: `<p>把压紧流的 logits/hidden 按 layout 散射回定步长形状(空洞补 0),此后所有下游 kernel 都以统一的 strided 布局工作。sampling 参数修正(temperature 等)也在 strided 形状上应用。</p>`,
+  why: `<ul>
+    <li><b>工程简化</b>:accept 系列 kernel 只需写一种寻址模式,static/compact 两条路径在此汇合,测试面(kernel parity 测试)也随之减半。</li>
+    <li><b>graph 友好</b>:strided 形状只依赖 (bs, γ),与本步 ragged 布局无关——正是折叠进固定 graph 缓冲所需要的稳定性。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_verify.py:394-419", "scatter 双份(logits+hidden)+ logits 修正"],
+    ["kernels/dspark_verify_window.py:452", "ScatterCompactToStrided kernel"],
+    ["dspark_components/dspark_planner.py:861", "apply_logits_adjustments_strided"],
+  ],
+},
+
+/* ---------- 15 Decode:accept ---------- */
+{
+  phase: 3,
+  title: "Decode ⑩:accept —— 逐位置判定,取连续命中前缀 + bonus",
+  nodes: ["n_verifier"],
+  edges: [],
+  micro() {
+    return `<h3>accept_draft_tokens(贪心:argmax 相等即命中)</h3>
+      ${row("A(验5)", toks([["d₁","accept"],["d₂","accept"],["d₃","accept"],["d₄","reject"]], 0, 220) + tok("b₁","bonus",950) + box("correct=3, commit=4","hl",1200))}
+      ${row("B(验3)", toks([["d₁","accept"],["d₂","reject"]], 300, 220) + toks([["d₃","dim draft"],["d₄","dim draft"]], 750, 60) + tok("b₁","bonus",1050) + box("correct=1, commit=2","hl",1300))}
+      ${row("C(验2)", toks([["d₁","reject"]], 600, 0) + toks([["d₂","dim draft"],["d₃","dim draft"],["d₄","dim draft"]], 850, 60) + tok("b₁","bonus",1150) + box("correct=0, commit=1","hl",1400))}
+      ${note(`绿 = 目标模型同意的草稿;红 = 第一个分歧点;<b>紫 = bonus</b>:分歧位置上目标模型自己的输出——
+        它不是"补偿",而是本来就要生成的 token,所以每步<b>至少净赚 1 个 token</b>,最坏情况也不慢于普通解码。
+        灰 = 根本没被验证的草稿(裁剪所致),<code>cutoff_layout</code> 保证接受长度不越过各自的验证边界。<br>
+        采样(非贪心)时用<b>拒绝采样</b>逐位置判定,数学上保证输出分布与目标模型逐 token 采样严格一致;
+        混合批次由 <code>SelectMixedAccept</code> 按请求分流。`)}`;
+  },
+  what: `<p><code>accept_draft_tokens</code> 逐位置比较目标 logits 与草稿:贪心请求比 argmax,采样请求走拒绝采样,得到每请求的连续命中长度 <code>correct_len</code>、分歧处的 <code>bonus</code> token,以及被验证边界截断的 <code>cap_trim_lens</code>。</p>`,
+  why: `<ul>
+    <li><b>正确性根基</b>:接受规则(前缀匹配 + 拒绝采样)保证无论 draft 猜得多差,最终输出分布恒等于目标模型独立解码——draft 只影响速度,不影响质量。</li>
+    <li><b>性能</b>:判定全程 GPU batch 化(无逐请求 host 循环),输出是定形状张量;贪心路径 <code>AcceptGreedy</code> 是一次融合 kernel。</li>
+    <li><b>观测旁路</b>:<code>SGLANG_SIMULATE_ACC_LEN</code> 可强制固定接受长度,用于剥离模型质量、单测调度/内核性能。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_verify.py:110-123", "accept_draft_tokens 调用 + 模拟旁路"],
+    ["dspark_components/dspark_verify.py:653", "accept_draft_tokens 实现入口"],
+    ["kernels/dspark_accept.py:22-558", "AcceptSampling / SelectMixedAccept / AcceptGreedy"],
+  ],
+},
+
+/* ---------- 16 Decode:finalize ---------- */
+{
+  phase: 3,
+  title: "Decode ⑪:finalize —— 汇总 commit_lens / new_seq_lens / out_tokens",
+  nodes: ["n_verifier","n_worker"],
+  edges: [],
+  micro() {
+    return `<h3>三个定形状产出</h3>
+      <div class="mrow">${box("commit_lens = correct_len + 1<br><span class='big'>[4, 2, 1]</span>", "hl", 0)}
+      ${box("new_seq_lens = prefix + commit<br><span class='big'>[12, 7, 12]</span>", "hl", 250)}
+      ${box("cap_trim_lens<br><span class='big'>[0, 0, 0]</span> <span style='color:var(--muted);font-size:11px'>(撞裁剪边界的损失)</span>", "", 500)}</div>
+      ${row("out A", toks([["d₁","accept"],["d₂","accept"],["d₃","accept"],["b₁","bonus"]], 800, 90))}
+      ${row("out B", toks([["d₁","accept"],["b₁","bonus"]], 1000, 90))}
+      ${row("out C", toks([["b₁","bonus"]], 1200, 0))}
+      ${note(`<code>FinalizeAcceptLens</code> 与 <code>BuildOutTokens</code> 都是定形状 kernel。
+        本步 3 个请求共产出 <b>7 个 token</b>(单步解码只能产 3 个)——这就是投机解码的收益直观化。
+        cap_trim_lens 单独记录"因验证被裁剪而损失的本可接受长度",供 SPS 预算的在线校准
+        (BlockAcceptEstimateRecorder)和指标上报使用:裁太狠它会变大,提示预算该放宽。`)}`;
+  },
+  what: `<p><code>FinalizeAcceptLens</code> 算出每请求的提交长度(<code>commit_lens = correct_len + 1</code>,含 bonus)和新序列长度;<code>BuildOutTokens</code> 把"接受的草稿 + bonus"组装成扁平的输出 token 张量(供 detokenize 与流式返回)。</p>`,
+  why: `<ul>
+    <li><b>性能</b>:调度器端只需一次 D2H 拷贝(<code>copy_to_cpu</code>)就能拿到全部结果——所有输出都是 GPU 上组装好的定形状张量,没有 Python 侧逐请求拼接。</li>
+    <li><b>反馈闭环</b>:<code>cap_trim_lens</code> 是弹性验证的"后悔度"信号,喂给在线接受率估计器,让预算策略可以自我校准。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_verify.py:125-144", "FinalizeAcceptLens + BuildOutTokens"],
+    ["kernels/dspark_accept.py:682-784", "FinalizeAcceptLens / CapCorrectLen kernel"],
+    ["dspark_components/dspark_block_accept_estimator.py:221", "BlockAcceptEstimateRecorder:在线校准"],
+  ],
+},
+
+/* ---------- 17 Decode:commit ---------- */
+{
+  phase: 3,
+  title: "Decode ⑫:commit —— 已接受位置的 hidden 注入 draft KV",
+  nodes: ["n_inj","n_draftkv","n_verifier"],
+  edges: ["e_target_inj","e_inj_draftkv"],
+  micro() {
+    return `<h3>inject_ragged:只写 commit_lens 以内的位置</h3>
+      ${row("A hidden", toks([["h₀","hid"],["h₁","hid"],["h₂","hid"],["h₃","hid"]], 0, 70) + toks([["h₄","dim hid"]], 350, 0))}
+      ${row("B hidden", toks([["h₀","hid"],["h₁","hid"]], 150, 70) + toks([["h₂","dim hid"],["·","hole"],["·","hole"]], 400, 60))}
+      ${row("C hidden", toks([["h₀","hid"]], 300, 0) + toks([["h₁","dim hid"],["·","hole"],["·","hole"],["·","hole"]], 500, 60))}
+      <div class="mrow" style="margin:12px 0 6px">${box("BuildCommitInjectLayout:未提交位置槽位写 −1(跳过)", "warm", 800)}</div>
+      ${row("draft KV", toks([["A×4","accept"],["B×2","accept"],["C×1","accept"]], 1100, 140) + `<span class="mlabel" style="min-width:0;margin-left:8px">与目标已提交序列逐 token 对齐</span>`)}
+      ${note(`这是 prefill "白嫖循环"的 decode 延续:每一批新提交的 token,其目标模型 hidden 都会注入 draft KV,
+        draft 的上下文始终与目标严格同步——下一步出块时它看到的世界和目标模型一致。<br>
+        被拒 token 的 KV 槽位<b>不写也不擦</b>:逻辑上作废,页表由调度器按 new_seq_lens 收回即可,省一次 GPU 写。
+        全贪心 + 无 logits 修正时,连这步都折进 verify graph 尾部(<code>epilogue.folds_commit</code>),
+        整个 decode 步趋近"两次 graph 回放 + 零 host 干预"。`)}`;
+  },
+  what: `<p><code>commit_hidden → inject_ragged</code>:按 <code>commit_lens</code> 生成注入布局(未提交位写 −1 跳过),把已接受位置的目标 hidden 经 draft 投影写进 draft KV。draft 的 KV 与目标的已提交序列保持逐 token 对齐。</p>`,
+  why: `<ul>
+    <li><b>正确性</b>:draft 下一步的注意力必须建立在"目标已确认"的上下文上,否则猜测质量崩塌;注入即同步。</li>
+    <li><b>显存/性能</b>:拒收位置零成本作废(不擦除);MLA 路径把 full→SWA 槽位翻译和 norm+rope 融合在一个 kernel 里。</li>
+    <li><b>极致折叠</b>:<code>DsparkVerifyEpilogue</code> 的 capture_hook 把 scatter/accept/commit 全部缝在 verify graph 尾部,消灭这段的所有 kernel launch——decode 关键路径上 host 只负责按一次"回放"按钮。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_verify.py:282-313", "commit_hidden:compact/static 双路径"],
+    ["dspark_components/dspark_kv_inject.py:105-157", "inject_ragged + BuildCommitInjectLayout"],
+    ["dspark_components/dspark_verify.py:448-651", "DsparkVerifyEpilogue:graph 内折叠 accept/commit"],
+    ["dspark_components/dspark_worker_v2.py:621-632", "folded_commit 时跳过 eager commit"],
+  ],
+},
+
+/* ---------- 18 Decode:闭环 ---------- */
+{
+  phase: 3,
+  title: "Decode ⑬:结果回传,bonus 成为下一步的锚点",
+  nodes: ["n_worker","n_sched"],
+  edges: ["e_worker_sched"],
+  micro() {
+    return `<h3>GenerationBatchResult → 调度器 → 下一步</h3>
+      <div class="mrow">
+        ${box("next_token_ids = out_tokens<br><span style='color:var(--muted);font-size:11px'>7 个 → detokenize / 流式输出</span>", "", 0)}
+        ${box("accept_lens = commit_lens<br><span style='color:var(--muted);font-size:11px'>[4,2,1] → 指标/统计</span>", "", 200)}
+        ${box("next_draft_input<br><span style='color:var(--muted);font-size:11px'>bonus [b₁ᴬ,b₁ᴮ,b₁ᶜ] + new_seq_lens</span>", "hl", 400)}
+      </div>
+      <div class="mrow" style="margin-top:12px">${box("调度器:batch.spec_info ← next_draft_input · seq_lens ← new_seq_lens · 页表按需回收", "warm", 750)}</div>
+      ${row("下一步块 A", toks([["b₁","anchor"],["M","mask"],["M","mask"],["M","mask"]], 1100, 100) + `<span class="mlabel" style="min-width:0;margin-left:10px">回到 Decode ②,循环直至 EOS/stop</span>`)}
+      ${note(`与 prefill 收尾完全同构:bonus 兼任"用户可见输出"与"下一块锚点"。
+        每个 decode 步都是 <b>draft 块前向 ×1 + target verify ×1</b> 的固定节拍,
+        循环推进直到某个请求命中停止条件,由调度器正常下线。`)}`;
+  },
+  what: `<p>worker 打包 <code>GenerationBatchResult</code>(输出 token、接受统计、下一步 draft 输入)返回;调度器回写 <code>spec_info</code> 与 <code>seq_lens</code>,detokenizer 把新 token 流式发给用户。下一次 <code>run_batch</code> 从 Decode ② 重新开始。</p>`,
+  why: `<ul>
+    <li><b>节拍稳定</b>:每步固定"两次大前向",没有变长的内层循环,调度器可以精确预留页表(γ+1)与选择 graph 档位——可预期性本身就是高吞吐系统的性能特性。</li>
+    <li><b>统计外送</b>:<code>accept_lens / block_accept_lens / cap_lens</code> 一路带出,metrics reporter 计算平均接受长度(投机解码最重要的健康指标)。</li>
+  </ul>`,
+  code: [
+    ["dspark_components/dspark_worker_v2.py:658-674", "GenerationBatchResult 打包"],
+    ["managers/scheduler.py:3442-3448", "spec_info / seq_lens 回写(闭环)"],
+    ["managers/scheduler_components/metrics_reporter.py:330", "接受长度指标上报"],
+  ],
+},
+
+/* ---------- 19 总结 ---------- */
+{
+  phase: 4,
+  title: "总结:DSpark 的四条设计主线",
+  nodes: ["n_sched","n_worker","n_draft","n_target","n_planner","n_verifier","n_inj","n_draftkv","n_targetkv"],
+  edges: ["e_sched_worker","e_worker_draft","e_worker_planner","e_planner_verifier","e_verifier_target","e_target_inj","e_inj_draftkv"],
+  micro() {
+    return `<h3>一图流回顾</h3>
+      <div class="mrow">${box("① 块式草稿<br><span style='color:var(--muted);font-size:11px'>γ 个 [MASK] 一次前向,Markov 头链式修正;<br>γ 次小前向 → 1 次,发射开销摊薄 γ 倍</span>", "hl", 0)}
+      ${box("② 语义白嫖<br><span style='color:var(--muted);font-size:11px'>目标中间层 hidden 注入 draft KV;<br>draft 无 prompt 成本,上下文永远同步</span>", "hl", 200)}</div>
+      <div class="mrow">${box("③ 弹性验证<br><span style='color:var(--muted);font-size:11px'>置信度 + SPS 代价表 → 每请求 verify_lens;<br>压紧执行,verify FLOPs 只花在值得验的 token 上</span>", "hl", 400)}
+      ${box("④ Graph 折叠<br><span style='color:var(--muted);font-size:11px'>采样折进 draft graph 尾,accept/commit 折进 verify graph 尾;<br>decode 步 ≈ 两次 graph 回放,host 出局</span>", "hl", 600)}</div>
+      ${note(`继续深挖的三个推荐切入点:<br>
+        · <b>预算算法</b>:<code>dspark_planner.py</code> 的 <code>compute_verify_token_budget</code>(SPS 表如何换算成边际决策)与 overlap 滞后中继;<br>
+        · <b>Graph 折叠机制</b>:<code>DsparkVerifyEpilogue.capture_hook</code> 如何把 accept 缝进 verify graph(dspark_verify.py:448-651);<br>
+        · <b>Markov 头数学</b>:<code>models/dspark.py</code> 三种头(vanilla/gated/rnn)的块内自回归公式差异。<br><br>
+        按 <kbd style="font-family:var(--mono);border:1px solid var(--border);border-radius:4px;padding:0 5px;font-size:11px">R</kbd> 可从头再看一遍。`)}`;
+  },
+  what: `<p>一个新请求的完整生命周期:prefill 一次目标前向(捕获 hidden → 注入 draft KV → bonus 锚点),之后每个 decode 步都是固定节拍的「draft 块前向 → 置信度定预算 → 压紧验证 → accept → commit → 闭环」,平均每步产出 1 + 平均接受长度个 token。</p>`,
+  why: `<p>四条主线共同指向同一个目标:<span class="hlterm">让昂贵的目标模型每次前向都物尽其用,让便宜的部分(draft、调度、host 逻辑)彻底退出关键路径</span>。块式草稿省 draft 的发射开销,语义注入省 draft 的算力,弹性验证省 target 的算力,graph 折叠省 host 的时间——每一层浪费都被单独识别并消除。</p>`,
+  code: [
+    ["dspark_components/dspark_worker_v2.py:477-674", "_forward_decode:整条主线的编排全景"],
+    ["test/registered/spec/dspark/", "各组件的单测(kernel parity / scheduler / sps 等)"],
+  ],
+},
+];
+
+/* ============================================================
+ * 驱动逻辑:播放 / 单步 / 重置 / 键盘
+ * ============================================================ */
+const allNodes = ["n_sched","n_worker","n_draft","n_target","n_planner","n_verifier","n_inj","n_draftkv","n_targetkv"];
+const allEdges = ["e_sched_worker","e_worker_sched","e_worker_draft","e_worker_target","e_worker_planner",
+                  "e_worker_verifier","e_verifier_target","e_target_inj","e_inj_draftkv",
+                  "e_draft_draftkv","e_target_targetkv","e_planner_verifier"];
+const edgeLabels = { e_sched_worker:"l_sched_worker", e_worker_draft:"l_worker_draft",
+                     e_worker_target:"l_worker_target", e_target_inj:"l_target_inj",
+                     e_inj_draftkv:"l_inj_draftkv", e_planner_verifier:"l_planner_verifier" };
+
+let cur = 0;
+let playing = false;
+let playTimer = null;
+let progressTimer = null;
+const BASE_STEP_MS = 9000;
+
+const $ = (id) => document.getElementById(id);
+const btnPlay = $("btnPlay"), btnNext = $("btnNext"), btnPrev = $("btnPrev"), btnReset = $("btnReset");
+const speedSel = $("speedSel");
+
+function speedFactor() { return parseFloat(speedSel.value); }
+
+function renderTimeline() {
+  const tl = $("timeline");
+  const groups = {};
+  steps.forEach((s, i) => { (groups[s.phase] = groups[s.phase] || []).push(i); });
+  tl.innerHTML = Object.keys(groups).map(ph =>
+    `<span class="phaseGroup"><span class="phaseName">${PHASES[ph]}</span>` +
+    groups[ph].map(i => `<span class="dot" data-i="${i}">${i}</span>`).join("") +
+    `</span>`).join("");
+  tl.querySelectorAll(".dot").forEach(d => d.addEventListener("click", () => goto(parseInt(d.dataset.i, 10))));
+}
+
+function updateTimeline() {
+  document.querySelectorAll(".dot").forEach(d => {
+    const i = parseInt(d.dataset.i, 10);
+    d.classList.toggle("cur", i === cur);
+    d.classList.toggle("done", i < cur);
+  });
+}
+
+function renderStep() {
+  const s = steps[cur];
+
+  // 架构图高亮
+  allNodes.forEach(n => $(n).classList.toggle("active", s.nodes.includes(n)));
+  allEdges.forEach(e => {
+    const el = $(e);
+    el.classList.remove("active", "activeWarm");
+    const lbl = edgeLabels[e] && $(edgeLabels[e]);
+    if (lbl) lbl.classList.remove("active", "activeWarm");
+  });
+  s.edges.forEach(spec => {
+    const warm = spec.endsWith(":warm");
+    const id = warm ? spec.slice(0, -5) : spec;
+    const el = $(id);
+    if (el) el.classList.add(warm ? "activeWarm" : "active");
+    const lbl = edgeLabels[id] && $(edgeLabels[id]);
+    if (lbl) lbl.classList.add(warm ? "activeWarm" : "active");
+  });
+
+  // 微观视图(重建以重放入场动画)
+  microEl.innerHTML = s.micro();
+
+  // 右侧讲解
+  $("expStepNo").textContent = `STEP ${cur}`;
+  $("expTitle").textContent = s.title;
+  $("expWhat").innerHTML = s.what;
+  $("expWhy").innerHTML = s.why;
+  $("expCode").innerHTML = s.code.map(c =>
+    `<span class="codeloc">${c[0]}<span>${c[1]}</span></span>`).join("");
+  document.querySelectorAll("#explain .section").forEach(el => {
+    el.style.animation = "none"; void el.offsetWidth; el.style.animation = "";
+  });
+  $("explainScroll").scrollTop = 0;
+
+  // 顶栏状态
+  $("phaseBadge").textContent = PHASES[s.phase];
+  $("stepIndicator").textContent = `${cur + 1} / ${steps.length}`;
+  btnPrev.disabled = cur === 0;
+  btnNext.disabled = cur === steps.length - 1;
+  updateTimeline();
+}
+
+function goto(i) {
+  cur = Math.max(0, Math.min(steps.length - 1, i));
+  renderStep();
+  try { history.replaceState(null, "", `#step=${cur}`); } catch (e) { /* 沙箱环境可能禁止,忽略 */ }
+  if (playing) scheduleNext();   // 手动跳转后重新计时
+  else clearProgress();
+}
+
+function next() { if (cur < steps.length - 1) goto(cur + 1); else stopPlay(); }
+function prev() { if (cur > 0) goto(cur - 1); }
+function reset() { stopPlay(); goto(0); }
+
+function clearProgress() {
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+  $("progressBar").style.width = playing ? $("progressBar").style.width : "0";
+  if (!playing) $("progressBar").style.width = "0";
+}
+
+function scheduleNext() {
+  if (playTimer) clearTimeout(playTimer);
+  clearProgress();
+  const dur = BASE_STEP_MS * speedFactor();
+  const t0 = performance.now();
+  progressTimer = setInterval(() => {
+    const p = Math.min(1, (performance.now() - t0) / dur);
+    $("progressBar").style.width = (p * 100) + "%";
+  }, 80);
+  playTimer = setTimeout(() => {
+    if (cur < steps.length - 1) { goto(cur + 1); }
+    else stopPlay();
+  }, dur);
+}
+
+function startPlay() {
+  if (cur === steps.length - 1) goto(0);
+  playing = true;
+  btnPlay.textContent = "⏸ 暂停";
+  btnPlay.classList.remove("primary");
+  scheduleNext();
+}
+
+function stopPlay() {
+  playing = false;
+  btnPlay.textContent = "▶ 播放";
+  btnPlay.classList.add("primary");
+  if (playTimer) { clearTimeout(playTimer); playTimer = null; }
+  clearProgress();
+}
+
+btnPlay.addEventListener("click", () => playing ? stopPlay() : startPlay());
+btnNext.addEventListener("click", () => { stopPlay(); next(); });
+btnPrev.addEventListener("click", () => { stopPlay(); prev(); });
+btnReset.addEventListener("click", reset);
+speedSel.addEventListener("change", () => { if (playing) scheduleNext(); });
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT") return;
+  switch (ev.code) {
+    case "Space":      ev.preventDefault(); playing ? stopPlay() : startPlay(); break;
+    case "ArrowRight": ev.preventDefault(); stopPlay(); next(); break;
+    case "ArrowLeft":  ev.preventDefault(); stopPlay(); prev(); break;
+    case "KeyR":       ev.preventDefault(); reset(); break;
+    case "Home":       ev.preventDefault(); stopPlay(); goto(0); break;
+    case "End":        ev.preventDefault(); stopPlay(); goto(steps.length - 1); break;
+  }
+});
+
+renderTimeline();
+// 支持 #step=N 深链直达某一步
+const hashMatch = location.hash.match(/step=(\d+)/);
+if (hashMatch) cur = Math.max(0, Math.min(steps.length - 1, parseInt(hashMatch[1], 10)));
+renderStep();
+</script>
+</body>
+</html>
