@@ -3,7 +3,8 @@
 > 来源：[#33636](https://github.com/sgl-project/sglang/issues/33636) 分类 *Communication & context parallelism*  
 > 状态抓取时间（UTC）：2026-08-08 08:08  
 > 仓库：`sgl-project/sglang`  
-> 用途：在另一个代码树/分支上逐项核对「做了没有」；**已合入 upstream main 的单独标注**；**有性能收益的 PR 用 🚀 重点标注**。
+> 用途：在另一个代码树/分支上逐项核对「做了没有」；**已合入 upstream main 的单独标注**；**有性能收益的 PR 用 🚀 重点标注**。  
+> **当前关注点：PD 的 D（Decode）节点吞吐 + 显存/KV 容量**（见下方「D 节点视角」）。
 
 ## 图例
 
@@ -15,6 +16,96 @@
 | 📦 容量/显存 | 主要增益是 KV 容量 / 可服务更长上下文 / 降显存复制（吞吐可能持平或略降） |
 | 🔧 使能 | 本身无独立 bench，但是 🚀/📦 的前置框架 |
 | 🛠 正确性/产品 | 不以性能数字为目标（修 bug / 功能入口） |
+| 🅳 D节点相关 | 直接作用于 PD Decode worker / decode-only 路径的吞吐或显存 |
+
+## D 节点视角（当前优先）
+
+> PD 拆分下：**P 侧 Prefill CP / Shared KV / LayerSplit 主要抬 P 的容量与 TTFT**；D 侧常驻的是 **完整（或 DCP 切分后的）KV + decode/MTP 计算**。  
+> 下面把「Comm & CP 清单内」与「#33636 其它 D 相关」分开，避免把 Prefill-only 优化误当成 D 收益。
+
+### 1) 本 Comm/CP 清单里：对 D 真正有用的
+
+| 优先级 | PR | 标记 | 对 D 的作用 | 宣称/性质 | Upstream |
+|---|---|---|---|---|---|
+| **P0** | [#30416](https://github.com/sgl-project/sglang/pull/30416) DCP | 🅳📦 | **Decode KV 按 DCP 切分**，降单卡常驻 KV，抬长上下文/并发可服务性（H20 显存墙） | 容量/可服务性主路径；仍 OPEN/draft | ❌ OPEN |
+| **P1** | [#30700](https://github.com/sgl-project/sglang/pull/30700) MNNVL pure AR | 🅳🚀 | D 上 TP pure allreduce 更快（decode 每层都走） | Blackwell TP4 decode **+2.6%~+6.9%** | ❌ OPEN |
+| **P1** | [#31700](https://github.com/sgl-project/sglang/pull/31700) + [#33250](https://github.com/sgl-project/sglang/pull/33250) / [#33217](https://github.com/sgl-project/sglang/pull/33217) | 🅳🛠 | 修 DP-attn / non-EP TBO；**D 开 TBO 的正确性前提** | 无直接数字；间接解锁 TBO | ❌ OPEN |
+| P2 | [#30885](https://github.com/sgl-project/sglang/pull/30885) PDMux | 🛠 | 同进程 P/D mux，**不是**经典 PD 的纯 D worker | 功能入口；高并发 D 吞吐另算 | ❌ OPEN |
+
+### 2) 本清单里：主要是 P 侧，对纯 D worker 基本不直接增益
+
+| PR | 为何不算 D 主收益 |
+|---|---|
+| #33532 CP V2 / #33236 去物化 / #28639 ag_gemm+moe_rs | Prefill CP 计算与通信，打 **TTFT/P 吞吐** |
+| #32059 Shared KV / #33382+#29187 LayerSplit | Prefill CP **显存复制**优化；LayerSplit 明确 **PD decode worker 收全量 shard、不在 D 上做 layer-split** |
+| （例外）Shared/LayerSplit 的 Mooncake transfer 适配 | 只影响 **P→D 传输描述是否正确**，不改变 D 常驻 KV 切分策略 |
+
+### 3) 跳出 Comm/CP：#33636 里更值得跟的 D 吞吐 / D 显存 PR
+
+#### 🅳📦 D 显存 / KV 容量（优先）
+
+| 优先级 | PR | 状态 | 要点 / 宣称 |
+|---|---|---|---|
+| P0 | [#30416](https://github.com/sgl-project/sglang/pull/30416) DCP | ❌ OPEN | Decode-side KV shard（见上） |
+| P0 | [#31097](https://github.com/sgl-project/sglang/pull/31097) Decode radix + MTP @ P/D | ❌ OPEN | 解 DSV4 decode radix 禁令；PD+NIXL shared-prefix bench 有跑通数字（H20） |
+| P0 | [#30371](https://github.com/sgl-project/sglang/pull/30371) SWA state pool 按 storage page 计 | ❌ OPEN | `full_token` **+9.6%**；`c4_state` 池 **-45%** 浪费（GB200 Flash） |
+| P0 | [#24041](https://github.com/sgl-project/sglang/pull/24041) C4/C128 state → BF16 | ❌ OPEN | H20 96G：`SGLANG_DSV4_COMPRESS_STATE_DTYPE=bf16` 省 HBM |
+| P1 | [#33288](https://github.com/sgl-project/sglang/pull/33288) C4 indexer logits peak 封顶 | ❌ OPEN | varlen + query-chunk 压 **峰值显存**（偏 indexer；长上下文 D/P 都受益） |
+| P1 | [#31713](https://github.com/sgl-project/sglang/pull/31713) SWA recompute | ❌ OPEN | FULL 命中后只重算尾部 SWA；长上下文复用 **TTFT 最高约 4.8×**（更偏 cache/P 路径，但抬整体 PD 复用） |
+
+#### 🅳🚀 D 吞吐 / decode·MTP（优先）
+
+| 优先级 | PR | 状态 | 要点 / 宣称 |
+|---|---|---|---|
+| P0 | [#30338](https://github.com/sgl-project/sglang/pull/30338) mixed-chunk 拆 decode→fp8 paged MLA | ❌ OPEN | 8×B300 Pro conc2048：**output tok/s +9.4%**，TPOT **-9.7%**（`SGLANG_OPT_MIXED_SPLIT_DECODE_ATTN`）· *更偏 colocated mixed-chunk；纯 decode-only D 若本就走 decode kernel，收益较小* |
+| P0 | [#30497](https://github.com/sgl-project/sglang/pull/30497) online C128 MTP overlap schedule | ❌ OPEN | GB300 Flash TP4：**output +5.38%**，mean TPOT **-5.45%** |
+| P1 | [#30700](https://github.com/sgl-project/sglang/pull/30700) FlashInfer pure AR | ❌ OPEN | decode AR（见上） |
+| P1 | [#32771](https://github.com/sgl-project/sglang/pull/32771) IndexCache + PD/CP/HiCache | ❌ OPEN | 长上下文 decode：256K **output +17.7%**（freq=4 vs 1）；含 PD 路径 |
+| P1 | [#32973](https://github.com/sgl-project/sglang/pull/32973) MTP × TRT-LLM sparse attn | ❌ OPEN | 让 TRT-LLM sparse 路径能跑 MTP（decode/spec 产品化） |
+| P2 | TBO 正确性三件套 #31700/#33217/#33250 | ❌ OPEN | D 上安全开 TBO 的前提 |
+
+### 4) D 节点建议跟进顺序（实操）
+
+```text
+显存/容量（D 常驻 KV）
+  #30371 SWA pool 计量修正          📦 小改大容量
+  #24041 compress state bf16        📦 H20 刚需向
+  #30416 DCP                        📦 大杀器（未合、复杂）
+  #31097 decode radix @ PD + MTP    📦/🚀 复用前缀、降重复传/算
+
+吞吐（D decode / MTP）
+  #30497 online C128 MTP overlap    🚀 +~5% output
+  #30700 MNNVL/FlashInfer pure AR   🚀 decode AR（多机/Blackwell）
+  #32771 IndexCache（长上下文）     🚀 随 ISL 增大更明显
+  #30338 mixed-split decode attn    🚀 若 D 跑 mixed-chunk / colocated
+  #31700→#33250 TBO                 🛠→间接 🚀
+
+不要误优先（纯 D worker）
+  #33236 / #28639 / #32059 / #29187  → 先算 P 侧 Prefill CP
+```
+
+### 5) 异地快速扫（只盯 D）
+
+```bash
+# DCP
+rg -n "SGLANG_DSV4_ENABLE_DCP|dcp_size|_try_forward_dcp_sharded" -g '*.py' | head
+
+# Decode radix @ PD
+rg -n "decode radix|enable_decode_radix|DecodeRadix|swa_decode_radix" -g '*.py' | head
+
+# SWA pool / bf16 state
+rg -n "swa.*page_size|COMPRESS_STATE_DTYPE|c4_state" python/sglang/srt/mem_cache python/sglang/srt/environ.py | head
+
+# Decode attn / MTP overlap / IndexCache
+rg -n "MIXED_SPLIT_DECODE_ATTN|num_mixed_decode_tokens" -g '*.py' | head
+rg -n "online C128|overlap.*MTP|C128_MTP" -g '*.py' | head
+rg -n "index_topk_freq|IndexCache" python/sglang/srt -g '*.py' | head
+
+# Decode AR
+rg -n "flashinfer_allreduce|kAllReduce|_can_use_flashinfer_allreduce" -g '*.py' | head
+```
+
+---
 
 ## 0. 总表（先扫一眼）
 
