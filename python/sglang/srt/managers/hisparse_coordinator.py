@@ -802,6 +802,77 @@ class HiSparseCoordinator:
         self.lru_slots[:, req.req_pool_idx, :].copy_(self._lru_init)
         self._skip_first_backup[req.req_pool_idx] = False
 
+    def _host_indices_cpu(self, host_indices: torch.Tensor) -> torch.Tensor:
+        return host_indices.detach().to(device="cpu", dtype=torch.int64)
+
+    def _clone_host_kv(self, host_indices: torch.Tensor):
+        host_indices_cpu = self._host_indices_cpu(host_indices)
+        kv_buffer = self.mem_pool_host.kv_buffer
+        if isinstance(kv_buffer, list):
+            return [buf[host_indices_cpu].detach().clone() for buf in kv_buffer]
+        return [
+            kv_buffer[layer_id][host_indices_cpu].detach().clone()
+            for layer_id in range(kv_buffer.shape[0])
+        ]
+
+    def _write_host_kv(self, host_indices: torch.Tensor, host_kv) -> None:
+        host_indices_cpu = self._host_indices_cpu(host_indices)
+        kv_buffer = self.mem_pool_host.kv_buffer
+        if isinstance(kv_buffer, list):
+            for layer_id, layer_cpu in enumerate(host_kv):
+                kv_buffer[layer_id][host_indices_cpu] = layer_cpu
+            return
+        for layer_id, layer_cpu in enumerate(host_kv):
+            kv_buffer[layer_id][host_indices_cpu] = layer_cpu
+
+    def snapshot_kv_cache(self, req: Req) -> dict:
+        """Clone host KV (and DSA index-K) before retract frees those slots.
+
+        Decode PD HiSparse keeps the full sequence on the host pool. The device
+        working set is only a subset, so a device-only get_cpu_copy cannot
+        restore the request later.
+        """
+        self.wait_for_pending_backup()
+        token_len = max(int(req.seqlen) - 1, 0)
+        host_len = min(
+            self.host_token_len(token_len),
+            int(self.req_to_host_pool_allocated_len[req.req_pool_idx]),
+        )
+        if host_len <= 0:
+            return {
+                "kind": "hisparse",
+                "host_kv": [],
+                "index_k": None,
+                "host_len": 0,
+            }
+
+        host_indices = self.req_to_host_pool[req.req_pool_idx, :host_len]
+        index_k = None
+        if not self.is_dsv4_hisparse and token_len > 0:
+            token_indices = self.req_to_token_pool.req_to_token[
+                req.req_pool_idx, :token_len
+            ]
+            index_k = self.mem_pool_device._copy_index_k_cpu(token_indices)
+        return {
+            "kind": "hisparse",
+            "host_kv": self._clone_host_kv(host_indices),
+            "index_k": index_k,
+            "host_len": host_len,
+        }
+
+    def load_kv_cache(self, req: Req) -> None:
+        snapshot = req.kv_cache_cpu
+        host_len = int(snapshot["host_len"])
+        if host_len <= 0:
+            return
+
+        host_indices = self.req_to_host_pool[req.req_pool_idx, :host_len]
+        self._write_host_kv(host_indices, snapshot["host_kv"])
+        if snapshot["index_k"] is None or self.is_dsv4_hisparse:
+            return
+        token_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, :host_len]
+        self.mem_pool_device._load_index_k_cpu(snapshot["index_k"], token_indices)
+
     def swap_in_selected_pages(
         self,
         req_pool_indices: torch.Tensor,

@@ -708,7 +708,18 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 swa_allocatable_tokens -= swa_required
 
             # load from cpu, release the cpu copy
-            req.load_kv_cache(self.req_to_token_pool, self.token_to_kv_pool_allocator)
+            snapshot = getattr(req, "kv_cache_cpu", None)
+            if (
+                self.scheduler.enable_hisparse
+                and isinstance(snapshot, dict)
+                and snapshot.get("kind") == "hisparse"
+            ):
+                self.scheduler.hisparse_coordinator.load_kv_cache(req)
+                del req.kv_cache_cpu
+            else:
+                req.load_kv_cache(
+                    self.req_to_token_pool, self.token_to_kv_pool_allocator
+                )
 
         self.retracted_queue = [
             entry

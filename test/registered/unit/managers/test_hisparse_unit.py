@@ -848,6 +848,79 @@ class TestHiSparseUnit(unittest.TestCase):
 
         self._assert_sizes_restored(initial, "batch_multiple")
 
+    def test_device_pool_cpu_copy_roundtrip(self):
+        """HiSparseDSATokenToKVPool.get_cpu_copy must translate logical locs."""
+        fill_len = self.page_size
+        req = _make_req("cpu-copy-roundtrip", list(range(fill_len)))
+        self._alloc_req_slot(req)
+        kv_loc = self._alloc_kv(req, fill_len)
+        self._write_device_patterns(kv_loc, fill_len)
+
+        cpu_copy = self.allocator.get_cpu_copy(kv_loc)
+        self.assertIn("kv", cpu_copy)
+        self.assertIn("index_k", cpu_copy)
+
+        hisparse_locs = self.allocator.full_to_hisparse_device_index_mapping[kv_loc]
+        for lid in range(LAYER_NUM):
+            self.device_pool.kv_buffer[lid][hisparse_locs] = 0
+
+        self.allocator.load_cpu_copy(cpu_copy, kv_loc)
+        for lid in range(LAYER_NUM):
+            self._assert_kv_correct(
+                hisparse_locs,
+                torch.arange(fill_len, device="cuda", dtype=torch.int32),
+                lid,
+                fill_len,
+                msg="cpu_copy_roundtrip: ",
+            )
+
+        self._cleanup_req(req, kv_loc)
+
+    def test_coordinator_snapshot_restores_host_kv(self):
+        """Decode retract must snapshot host KV, not just the device working set."""
+        fill_len = self.page_size
+        req = _make_req(
+            "host-snapshot",
+            origin_input_ids=list(range(fill_len)),
+            output_ids=[99],
+        )
+        self._alloc_req_slot(req)
+        kv_loc = self._alloc_kv(req, fill_len, logical_only=True)
+        self._populate_host_pool(req, fill_len)
+
+        snapshot = self.coordinator.snapshot_kv_cache(req)
+        self.assertEqual(snapshot["kind"], "hisparse")
+        self.assertEqual(snapshot["host_len"], fill_len)
+
+        self.coordinator.request_finished(req)
+        host_pool = self.coordinator.mem_pool_host
+        new_host = host_pool.alloc(fill_len)
+        self.assertIsNotNone(new_host, "Host realloc failed")
+        new_host = new_host.to(device="cuda")
+        self.coordinator.req_to_host_pool[req.req_pool_idx, :fill_len] = new_host
+        self.coordinator.req_to_host_pool_allocated_len[req.req_pool_idx] = fill_len
+        for lid in range(LAYER_NUM):
+            host_pool.kv_buffer[lid][new_host.cpu()] = 0
+
+        req.kv_cache_cpu = snapshot
+        self.coordinator.load_kv_cache(req)
+        for lid in range(LAYER_NUM):
+            restored = host_pool.kv_buffer[lid][new_host.cpu()]
+            for i in range(fill_len):
+                expected = self._kv_pattern(lid, i)
+                self.assertTrue(
+                    torch.allclose(
+                        restored[i].float(),
+                        torch.full_like(restored[i].float(), expected),
+                        atol=1e-2,
+                    ),
+                    f"host snapshot layer {lid} token {i} mismatch",
+                )
+
+        host_pool.free(new_host)
+        self.allocator.logical_attn_allocator.free(kv_loc)
+        self._free_req_slot(req)
+
 
 if __name__ == "__main__":
     unittest.main()
