@@ -686,11 +686,24 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 count_retracted=False
             )
 
+        # HiSparse physical constraint (mirrors pop_preallocated): each resumed
+        # request re-admits a device buffer of up to padded_buffer_size, freed
+        # earlier by retract_req.
+        hisparse_resume_budget = float("inf")
+        if self.scheduler.enable_hisparse:
+            hisparse_resume_budget = (
+                self.token_to_kv_pool_allocator.hisparse_attn_allocator.available_size()
+                // self.scheduler.hisparse_coordinator.padded_buffer_size
+            )
+
         for i, req in enumerate(self.retracted_queue):
             if rids_to_check is not None and req.rid not in rids_to_check:
                 continue
 
             if self.req_to_token_pool.available_size() <= 0:
+                break
+
+            if hisparse_resume_budget <= 0:
                 break
 
             full_required, swa_required = self._prealloc_required_tokens(req)
@@ -714,8 +727,15 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
                 and isinstance(snapshot, dict)
                 and snapshot.get("kind") == "hisparse"
             ):
-                self.scheduler.hisparse_coordinator.load_kv_cache(req)
+                coordinator = self.scheduler.hisparse_coordinator
+                coordinator.load_kv_cache(req)
                 del req.kv_cache_cpu
+                # Retract freed the device buffer and zeroed its metadata, so
+                # the request must be re-admitted. Admission comes after the
+                # host restore because short sequences preload the device
+                # buffer from the host pool.
+                coordinator.admit_request_direct(req)
+                hisparse_resume_budget -= 1
             else:
                 req.load_kv_cache(
                     self.req_to_token_pool, self.token_to_kv_pool_allocator

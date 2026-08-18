@@ -818,10 +818,6 @@ class HiSparseCoordinator:
     def _write_host_kv(self, host_indices: torch.Tensor, host_kv) -> None:
         host_indices_cpu = self._host_indices_cpu(host_indices)
         kv_buffer = self.mem_pool_host.kv_buffer
-        if isinstance(kv_buffer, list):
-            for layer_id, layer_cpu in enumerate(host_kv):
-                kv_buffer[layer_id][host_indices_cpu] = layer_cpu
-            return
         for layer_id, layer_cpu in enumerate(host_kv):
             kv_buffer[layer_id][host_indices_cpu] = layer_cpu
 
@@ -832,6 +828,17 @@ class HiSparseCoordinator:
         working set is only a subset, so a device-only get_cpu_copy cannot
         restore the request later.
         """
+        if self.is_dsv4_hisparse:
+            # DeepSeekV4PagedHostPool.kv_buffer is page-row addressed (one row
+            # per C4 page, tokens interleaved as [values][scales] inside the
+            # row), so the token-slot cloning below would corrupt memory. DSV4
+            # also keeps SWA-window KV and indexer state outside the C4 host
+            # pool, which this snapshot does not cover. Fail loudly instead of
+            # resuming with corrupt KV (DSV4 decode retract was equally
+            # unsupported before: offload_kv_cache raised NotImplementedError).
+            raise NotImplementedError(
+                "HiSparse retract snapshot is not implemented for DSV4 HiSparse"
+            )
         self.wait_for_pending_backup()
         token_len = max(int(req.seqlen) - 1, 0)
         host_len = min(
@@ -847,16 +854,14 @@ class HiSparseCoordinator:
             }
 
         host_indices = self.req_to_host_pool[req.req_pool_idx, :host_len]
-        index_k = None
-        if not self.is_dsv4_hisparse and token_len > 0:
-            token_indices = self.req_to_token_pool.req_to_token[
-                req.req_pool_idx, :token_len
-            ]
-            index_k = self.mem_pool_device._copy_index_k_cpu(token_indices)
+        # Snapshot index-K over the same host_len span that load_kv_cache
+        # restores, so the per-chunk shapes always line up (host_len equals
+        # token_len unless the host allocation cap truncated it).
+        token_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, :host_len]
         return {
             "kind": "hisparse",
             "host_kv": self._clone_host_kv(host_indices),
-            "index_k": index_k,
+            "index_k": self.mem_pool_device._copy_index_k_cpu(token_indices),
             "host_len": host_len,
         }
 
@@ -868,7 +873,7 @@ class HiSparseCoordinator:
 
         host_indices = self.req_to_host_pool[req.req_pool_idx, :host_len]
         self._write_host_kv(host_indices, snapshot["host_kv"])
-        if snapshot["index_k"] is None or self.is_dsv4_hisparse:
+        if snapshot["index_k"] is None:
             return
         token_indices = self.req_to_token_pool.req_to_token[req.req_pool_idx, :host_len]
         self.mem_pool_device._load_index_k_cpu(snapshot["index_k"], token_indices)
