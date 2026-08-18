@@ -1,9 +1,9 @@
 # DeepSeek-V4 Communication & Context Parallelism PR 核对清单
 
-> 来源：[#33636](https://github.com/sgl-project/sglang/issues/33636) 分类 *Communication & context parallelism*  
-> 状态抓取时间（UTC）：2026-08-08 08:08  
-> 仓库：`sgl-project/sglang`  
-> 用途：在另一个代码树/分支上逐项核对「做了没有」；**已合入 upstream main 的单独标注**；**有性能收益的 PR 用 🚀 重点标注**。  
+> 来源：[#33636](https://github.com/sgl-project/sglang/issues/33636) 分类 *Communication & context parallelism*
+> 状态抓取时间（UTC）：2026-08-08 08:08
+> 仓库：`sgl-project/sglang`
+> 用途：在另一个代码树/分支上逐项核对「做了没有」；**已合入 upstream main 的单独标注**；**有性能收益的 PR 用 🚀 重点标注**。
 > **当前关注点：PD 的 D（Decode）节点吞吐 + 显存/KV 容量**（见下方「D 节点视角」）。
 
 ## 图例
@@ -20,7 +20,7 @@
 
 ## D 节点视角（当前优先）
 
-> PD 拆分下：**P 侧 Prefill CP / Shared KV / LayerSplit 主要抬 P 的容量与 TTFT**；D 侧常驻的是 **完整（或 DCP 切分后的）KV + decode/MTP 计算**。  
+> PD 拆分下：**P 侧 Prefill CP / Shared KV / LayerSplit 主要抬 P 的容量与 TTFT**；D 侧常驻的是 **完整（或 DCP 切分后的）KV + decode/MTP 计算**。
 > 下面把「Comm & CP 清单内」与「#33636 其它 D 相关」分开，避免把 Prefill-only 优化误当成 D 收益。
 
 ### 1) 本 Comm/CP 清单里：对 D 真正有用的
@@ -235,8 +235,8 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 ```diff
 @@ -185,6 +185,22 @@ def outplace_all_reduce(
      return group._all_reduce_out_place(tensor, outplace_all_reduce_method)
- 
- 
+
+
 +@register_custom_op(out_shape="tensor")
 +def flashinfer_allreduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
 +    """FlashInfer kAllReduce over ``group_name``.
@@ -265,11 +265,11 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 +        # by _tag_groups_for_flashinfer_allreduce_only() after group init.
 +        self._fi_workspace_hint: Optional[str] = None
          self.local_size = get_int_env_var("LOCAL_SIZE", 0)
- 
+
          if is_cuda_alike():
 @@ -666,6 +686,9 @@ def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
              return self.npu_communicator.all_reduce(input_)
- 
+
          if torch.compiler.is_compiling():
 +            if self._can_use_flashinfer_allreduce(input_):
 +                return flashinfer_allreduce(input_, group_name=self.unique_name)
@@ -280,7 +280,7 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 @@ -717,6 +740,9 @@ def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
                  self.pynccl_comm.all_reduce(input_)
                  return input_
- 
+
 +        if self._can_use_flashinfer_allreduce(input_):
 +            return flashinfer_allreduce(input_, group_name=self.unique_name)
 +
@@ -290,7 +290,7 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 @@ -913,6 +939,29 @@ def _resolve_outplace_all_reduce_method(
              return "pynccl"
          return None
- 
+
 +    def _can_use_flashinfer_allreduce(self, input_: torch.Tensor) -> bool:
 +        if self._fi_workspace_hint is None:
 +            return False
@@ -322,13 +322,13 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
  # (MNNVL) group. Used on the all_reduce hot path (see GroupCoordinator).
  _CA_V2_MULTINODE = envs.SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE.get()
 +_ENABLE_FLASHINFER_ALLREDUCE_ONLY = False
- 
- 
+
+
  def set_custom_all_reduce(enable: bool):
 @@ -2016,6 +2066,41 @@ def set_torch_symm_mem_all_reduce(enable: bool):
      _ENABLE_TORCH_SYMM_MEM_ALL_REDUCE = enable
- 
- 
+
+
 +def set_flashinfer_allreduce_only(enable: bool):
 +    global _ENABLE_FLASHINFER_ALLREDUCE_ONLY
 +    _ENABLE_FLASHINFER_ALLREDUCE_ONLY = enable
@@ -342,8 +342,8 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 ```diff
 @@ -860,6 +860,105 @@ def flashinfer_allreduce_residual_rmsnorm(
      return norm_out, residual_out
- 
- 
+
+
 +def can_use_flashinfer_allreduce(
 +    input_: torch.Tensor,
 +    *,
@@ -450,7 +450,7 @@ FlashInfer MNNVL pure AR；`parallel_state` bootstrap；layer communicator fusio
 @@ -816,6 +816,18 @@ def should_fuse_mlp_allreduce_with_next_layer(
          if is_enable_moe_cp_allgather():
              return False
- 
+
 +        # Fusing makes the next layer's residual+LN absorb the post-experts
 +        # all-reduce, and that fused kernel reduces over a single group. Under
 +        # hybrid EP+TP the post-experts reduction spans two disjoint groups
@@ -609,10 +609,10 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
 ```diff
 @@ -1,17 +1,28 @@
  from __future__ import annotations
- 
+
 +import logging
  from typing import TYPE_CHECKING, List, Literal, Optional, TypeAlias, Union, cast
- 
+
  import torch
 -
  from sglang.kernels.jit.utils import is_hip_runtime
@@ -634,16 +634,16 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
 +    is_dsa_prefill_cp_round_robin_split,
 +)
 +from sglang.srt.runtime_context import get_parallel, get_server_args
- 
+
  if TYPE_CHECKING:
      from sglang.srt.layers.attention.deepseek_v4_backend import DSV4Metadata
 @@ -26,6 +37,7 @@
  FusedCompressMetadata: TypeAlias = CompressMetadata
- 
+
  _is_hip = is_hip_runtime()
 +logger = logging.getLogger(__name__)
- 
- 
+
+
  def _use_online_compress(compress_ratio: int) -> bool:
 @@ -130,6 +142,104 @@ class CompressorBackendMixin:
      def __init__(self):
@@ -736,7 +736,7 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
 ```diff
 @@ -1062,15 +1062,23 @@ def _forward_prepare(
              kv = None
- 
+
              if not unified and use_cp:
 -                # DSA CP: keep bf16 kv around for the cross-rank all-gather, then
 -                # write to the FlashMLA cache after gather.
@@ -825,7 +825,7 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
 +    get_spec,
 +)
  from sglang.srt.utils import ceil_div, is_hip
- 
+
  logger = logging.getLogger(__name__)
 @@ -61,6 +66,7 @@ def __init__(
          enable_memory_saver: bool,
@@ -843,7 +843,7 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
 +        self.direct_cp_handle = None
 +        self._direct_cp_root = None
          self._create_buffers()
- 
+
      def _create_buffers(self):
          with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
 +            if self.direct_cp_store:
@@ -908,7 +908,7 @@ SGLANG_OPT_USE_CP_COMPRESS=1           # CP4：用 symm-mem 发 window compresso
                  if self.custom_mem_pool
 @@ -570,6 +636,31 @@ def __init__(
          )
- 
+
          self._unified_kv = is_unified_kv_triton()
 +        direct_cp_store = envs.SGLANG_OPT_DSV4_CP_DIRECT_KV_STORE.get()
 +        if direct_cp_store:
@@ -985,7 +985,7 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
      SGLANG_OPT_SWIGLU_CLAMP_FUSION = EnvBool(True)
 +    # Fused AG-GEMM and MoE reduce-scatter via torch symmetric memory.
 +    SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL = EnvBool(False)
- 
+
      # Cache / overlap
      SGLANG_OPT_USE_FUSED_STORE_CACHE = EnvBool(True)
 ```
@@ -1030,12 +1030,12 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
  )
 +from sglang.srt.server_args import get_global_server_args
  from sglang.srt.utils import is_cuda, is_hip
- 
+
  try:
 @@ -58,9 +59,20 @@ def __init__(self, group: ProcessGroup, device: Union[int, str, torch.device]):
              device: Target CUDA device (index, 'cuda:X', or torch.device).
          """
- 
+
 +        # disabled: entire communicator unusable.
 +        # allreduce_disabled: only the allreduce fast path is off; buffers
 +        # may still serve fused-kernel contexts (RS/AG).
@@ -1050,7 +1050,7 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
 +        self._ag_gemm_ctx = None
 +        self._ag_gemm_key = None
 +        self._ag_gemm_stream: Optional[torch.cuda.Stream] = None
- 
+
          if not torch_symm_mem_available:
              return
 @@ -99,15 +111,32 @@ def __init__(self, group: ProcessGroup, device: Union[int, str, torch.device]):
@@ -1087,7 +1087,7 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
 +        if comm is None or comm.disabled or not comm.use_cp:
 +            return None
 +        return comm
- 
+
      def should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
          """
 @@ -122,7 +151,7 @@ def should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
@@ -1154,11 +1154,11 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
 @@ -208,6 +208,9 @@ def _freqs_cis_to_cos_sin(
      _FREQS_CIS_TO_COS_SIN[key] = (cos, sin)
      return cos, sin
- 
+
 +def _cp_fused_symm_mem_enabled() -> bool:
 +    """True when CP AG/RS should be handled by torch_symm_mem fused kernels."""
 +    return envs.SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL.get() and not get_is_capture_mode()
- 
+
  if TYPE_CHECKING:
      from sglang.srt.layers.attention.deepseek_v4_backend import (
 @@ -1611,7 +1614,8 @@ def forward(
@@ -1183,7 +1183,7 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
                  get_local_dp_buffer(get_tp_group()),
 @@ -1810,6 +1815,9 @@ def forward(
              input_ids_global = input_ids
- 
+
          if dsa_use_prefill_cp(forward_batch):
 +            _comm = get_tp_group().torch_symm_mem_comm
 +            if _comm is not None and _cp_fused_symm_mem_enabled():
@@ -1194,7 +1194,7 @@ SGLANG_OPT_USE_TORCH_SYMM_MEM_FUSED_KERNEL=1   # PR 新增，默认 False
 @@ -1848,6 +1856,9 @@ def forward(
                  hidden_states, prev_residual, prev_post, prev_comb
              )
- 
+
 +        _comm = get_tp_group().torch_symm_mem_comm
 +        if _comm is not None:
 +            _comm.set_use_cp(False)
@@ -1237,7 +1237,7 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 # hook: validate_deepseek_v4_shared_target / validate_deepseek_v4_shared_release
 ```
 
-新包：`python/sglang/srt/mem_cache/shared_kv/`（`vmm.py`, `family.py`, `layout.py`, ...）  
+新包：`python/sglang/srt/mem_cache/shared_kv/`（`vmm.py`, `family.py`, `layout.py`, ...）
 另有：`deepseek_v4_shared.py`, `shared_cache_access.py`, PD `shared_kv_staging.py`。
 
 ### 关键文件 / 符号（异地核对点）
@@ -1266,7 +1266,7 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 @@ -4688,6 +4693,12 @@ def _handle_model_specific_adjustments(self):
          hf_config = self.get_model_config().hf_config
          model_arch = hf_config.architectures[0]
- 
+
 +        if self.enable_dsa_shared_kv_cache:
 +            from sglang.srt.arg_groups.deepseek_v4_hook import (
 +                validate_deepseek_v4_shared_target,
@@ -1282,11 +1282,11 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
                  apply_deepseek_v4_defaults,
 +                validate_deepseek_v4_shared_release,
              )
- 
+
              apply_deepseek_v4_defaults(self, model_arch)
 +            if self.enable_dsa_shared_kv_cache:
 +                validate_deepseek_v4_shared_release(self, hf_config)
- 
+
          if model_arch in [
              "DeepseekV3ForCausalLM",
 ```
@@ -1296,17 +1296,17 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 ```diff
 @@ -4,13 +4,147 @@
  from typing import TYPE_CHECKING
- 
+
  from sglang.srt.environ import envs
 +from sglang.srt.runtime_context import get_parallel
- 
+
  if TYPE_CHECKING:
 +    from sglang.srt.model_executor.model_runner import ModelRunner
      from sglang.srt.server_args import ServerArgs
- 
+
  logger = logging.getLogger(__name__)
- 
- 
+
+
 +def is_dsv4_cache_shared_enabled(model_runner: ModelRunner) -> bool:
 +    """Whether DeepSeek V4 persistent cache pages are shared across CP ranks."""
 +    from sglang.srt.configs.model_config import is_deepseek_v4
@@ -1906,7 +1906,7 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 @@ -5039,9 +5042,9 @@ def _handle_model_specific_adjustments(self):
          hf_config = self.get_model_config().hf_config
          model_arch = hf_config.architectures[0]
- 
+
 -        if self.enable_dsa_cache_layer_split and not is_deepseek_dsa(hf_config):
 +        if self.enable_cp_cache_layer_split and not is_deepseek_dsa(hf_config):
              raise ValueError(
@@ -1914,7 +1914,7 @@ Prefill CP 通过 CUDA VMM 做 Shared KV：每个 CP rank 拥有物理页分片�
 +                "--enable-cp-cache-layer-split is only supported for DSA "
                  "(DeepSeek Sparse Attention) models."
              )
- 
+
 @@ -5158,26 +5161,26 @@ def _handle_model_specific_adjustments(self):
                          self.disaggregation_mode != "decode"
                      ), "CP is only supported for prefill when PD disaggregation, please remove --enable-prefill-cp."
@@ -2144,11 +2144,11 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 
 ```diff
 @@ -100,6 +100,7 @@
- 
+
  # Define constants
  DEFAULT_UVICORN_ACCESS_LOG_EXCLUDE_PREFIXES = ()
 +CP_CACHE_LAYER_SPLIT_HICACHE_STORAGE_BACKENDS = ("file", "mooncake")
- 
+
  SAMPLING_BACKEND_CHOICES = {"flashinfer", "pytorch", "ascend"}
  if envs.SGLANG_KV_CANARY_ENABLE_TOKEN_ORACLE.get():
 @@ -1051,10 +1052,13 @@ class ServerArgs:
@@ -2171,7 +2171,7 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 @@ -3391,6 +3395,12 @@ def __post_init__(self):
          # Apply model-specific adjustments.
          self._handle_model_specific_adjustments()
- 
+
 +        # Re-apply after model-specific defaults resolve attention_backend so
 +        # canonical CP mirrors to the right legacy runtime aliases before
 +        # LayerSplit adjusts CUDA graph settings.
@@ -2183,16 +2183,16 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
          # Must run before _handle_attention_backend_compatibility so the
 @@ -3452,6 +3462,7 @@ def __post_init__(self):
          from sglang.srt.arg_groups.speculative_hook import handle_speculative_decoding
- 
+
          handle_speculative_decoding(self)
 +        self._validate_cp_cache_layer_split_speculative_decoding()
- 
+
          # Needs the draft-token count derived just above.
          self._validate_gdn_replayssm_spec_ring()
 @@ -4747,12 +4758,6 @@ def _handle_model_specific_adjustments(self):
          hf_config = self.get_model_config().hf_config
          model_arch = hf_config.architectures[0]
- 
+
 -        if self.enable_dsa_cache_layer_split and not is_deepseek_dsa(hf_config):
 -            raise ValueError(
 -                "--enable-dsa-cache-layer-split is only supported for DSA "
@@ -2252,13 +2252,13 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 -                        "prefill context parallelism, and CP + PP has not been "
 -                        "validated for this feature."
 -                    )
- 
+
              else:
                  # DeepSeek V3/R1/V3.1
 @@ -6045,6 +6004,129 @@ def _handle_context_parallelism(self):
- 
+
          init_cp_strategy(self)
- 
+
 +    def _validate_cp_cache_layer_split_model(self) -> bool:
 +        """Validate the model and return whether DSV4-specific guards apply."""
 +        has_concrete_model_config = (
@@ -2273,7 +2273,7 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 @@ -144,6 +144,11 @@
          prepare_context_parallel_metadata,
      )
- 
+
 +from sglang.srt.mem_cache.cp_cache_layer_split.deepseek_v4_helpers import (
 +    is_cp_cache_layer_split_deepseek_v4_pool,
 +    maybe_prefetch_cp_kv_swa,
@@ -2284,8 +2284,8 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
      add_prefix,
 @@ -323,6 +328,38 @@ def _freqs_cis_to_cos_sin(
      from sglang.srt.model_executor.forward_batch_info import ForwardBatch
- 
- 
+
+
 +def _can_dsa_cp_split_for_deepseek_v4(
 +    input_ids_len: int,
 +    cp_size: int,
@@ -2343,7 +2343,7 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
              layer_id=self.layer_id,
              swa_loc=attn_backend.get_swa_out_cache_loc(forward_batch),
 @@ -964,8 +1005,12 @@ def _forward_prepare(
- 
+
          unified = is_unified_kv_triton()
          is_decode = forward_batch.forward_mode.is_decode_or_idle()
 +        token_to_kv_pool = get_token_to_kv_pool()
@@ -2354,12 +2354,12 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 -            not unified and self.use_fused_qk_norm_rope
 +            not unified and self.use_fused_qk_norm_rope and not use_layer_split_prefill
          )
- 
+
          if do_fused_store:
 @@ -986,7 +1031,6 @@ def _forward_prepare(
                  else self.wkv(x_linear)[0]
              )
- 
+
 -            token_to_kv_pool = get_token_to_kv_pool()
              if unified:
                  swa_cache = token_to_kv_pool.get_unified_kv(self.layer_id)
@@ -2367,11 +2367,11 @@ SGLANG_OPT_USE_COMPRESSOR_V2=1
 @@ -1103,23 +1147,42 @@ def _forward_prepare(
                  )
                  kv = None
- 
+
 +        maybe_prefetch_cp_kv_swa(get_token_to_kv_pool(), self.layer_id, forward_batch)
 +
          del qkv_a
- 
+
 +        token_to_kv_pool = get_token_to_kv_pool()
 +        reorder_c4_extra = (
 +            use_cp
@@ -2454,7 +2454,7 @@ index 8908b9bb2672..da21b91d92f8 100644
 +++ b/python/sglang/srt/arg_groups/deepseek_v4_hook.py
 @@ -167,6 +167,7 @@ def validate_deepseek_v4_cp(server_args: ServerArgs) -> None:
          )
- 
+
      server_args.enable_dsa_prefill_context_parallel = True
 +    server_args.enable_prefill_context_parallel = False
      server_args.dsa_prefill_cp_mode = "round-robin-split"
@@ -2475,12 +2475,12 @@ index e5cc4c6fa4b7..b397c4fed19e 100644
  )
 +from sglang.srt.layers.moe.utils import get_moe_a2a_backend
  from sglang.srt.runtime_context import get_parallel
- 
+
  if TYPE_CHECKING:
 @@ -219,6 +220,17 @@ def cp_shard_position_ids(complete_position_ids: Any, forward_batch):
      return strategy.shard_position_ids(complete_position_ids, forward_batch)
- 
- 
+
+
 +def cp_round_robin_input_ids_v2(input_ids: Any, forward_batch):
 +    assert is_cp_v2_active(forward_batch)
 +    if not get_moe_a2a_backend().is_none():
@@ -2497,7 +2497,7 @@ index e5cc4c6fa4b7..b397c4fed19e 100644
      assert is_cp_v2_active(forward_batch)
 @@ -226,18 +238,40 @@ def cp_gather_after_forward(x: Any, forward_batch, stream: Optional[Any] = None)
      assert strategy is not None
- 
+
      if isinstance(x, tuple):
 -        hidden_states, *rest = x
 -        hidden_states = strategy.gather_hidden_states(
@@ -2517,10 +2517,10 @@ index e5cc4c6fa4b7..b397c4fed19e 100644
 +        if len(gathered) == 2 and gathered[1] is None:
 +            return gathered[0]
 +        return gathered
- 
+
      return strategy.gather_hidden_states(x, forward_batch, stream)
- 
- 
+
+
 +def cp_materialize_global_token_order(
 +    x: Any, forward_batch, stream: Optional[Any] = None
 +):
@@ -2571,7 +2571,7 @@ index 402d3baa0355..0b7cf9195996 100644
 @@ -277,11 +278,16 @@ def refresh_for_breakable_cuda_graph_replay_(self, other: DSV4AttnMetadata) -> N
          for field_name in reference_assign_fields:
              setattr(self, field_name, getattr(other, field_name))
- 
+
 -    def init_compression_metadata(self):
 +    def init_compression_metadata(self, num_tokens: Optional[int] = None) -> None:
          assert self.page_table.dim() == 2
@@ -2585,13 +2585,13 @@ index 402d3baa0355..0b7cf9195996 100644
 -        ), f"{self.raw_out_loc.shape=}, {self.seq_lens_casual.shape=}"
 +            self.raw_out_loc.shape[0] == num_tokens
 +        ), f"{self.raw_out_loc.shape=}, {num_tokens=}"
- 
+
          (
              self.c4_out_loc,
 @@ -305,6 +311,8 @@ def init_compression_metadata(self):
          self.c128_page_indices = _pad_last_dim(self.c128_page_indices)
          self.swa_page_indices = _pad_last_dim(self.swa_page_indices)
- 
+
 +    # Cache-write locations stay in global logical order and are intentionally
 +    # excluded from CP reindexing.
      _CP_REINDEX_FIELDS = [
@@ -2600,7 +2600,7 @@ index 402d3baa0355..0b7cf9195996 100644
 @@ -323,7 +331,7 @@ def init_compression_metadata(self):
          "c128_out_loc",
      ]
- 
+
 -    def apply_cp_reindex(self) -> None:
 +    def apply_cp_reindex(self, num_tokens: Optional[int] = None) -> None:
          cp_rank = get_parallel().attn_cp_rank
@@ -2625,7 +2625,7 @@ index 402d3baa0355..0b7cf9195996 100644
 -                f"!= pre_global_len={pre_global_len} (must remain global for compressor write path)"
 +                f"!= num_tokens={num_tokens} (must remain global for compressor write path)"
              )
- 
+
      def init_flashmla_related(self, is_prefill: bool = False):
 @@ -721,13 +731,21 @@ def init_forward_metadata_prefill(
          use_prefill_cuda_graph: bool = False,
@@ -2677,10 +2677,10 @@ index 402d3baa0355..0b7cf9195996 100644
 +        num_tokens: Optional[int] = None,
      ) -> DSV4AttnMetadata:
          assert self.swa_page_size == SWA_WINDOW
- 
+
 @@ -2001,7 +2025,7 @@ def make_core_attn_metadata(
          )
- 
+
          if need_compress:
 -            core_attn_metadata.init_compression_metadata()
 +            core_attn_metadata.init_compression_metadata(num_tokens)
@@ -2759,7 +2759,7 @@ index 65dd55549924..1f89c0839762 100644
 @@ -2377,11 +2384,16 @@ def forward(
          else:
              input_ids_global = input_ids
- 
+
 -        if dsa_use_prefill_cp(forward_batch):
 -            if self.pp_group.is_first_rank:
 -                hidden_states = cp_split_and_rebuild_data(forward_batch, hidden_states)
@@ -2776,7 +2776,7 @@ index 65dd55549924..1f89c0839762 100644
 +                positions = cp_split_and_rebuild_position(forward_batch, positions)
 +                input_ids = cp_round_robin_input_ids(input_ids)
              input_ids_global = input_ids
- 
+
          # Reset Compressor's per-step freqs_cis cache from any previous step.
 @@ -2389,7 +2401,7 @@ def forward(
              if hasattr(forward_batch, _attr):
@@ -2789,7 +2789,7 @@ index 65dd55549924..1f89c0839762 100644
                  "DeepSeek-V4 prefill context parallelism (attn_cp_size > 1). Disable one "
 @@ -2444,7 +2456,7 @@ def forward(
                  )
- 
+
          # CP all-gather only on the last PP rank; PP IPC carries CP-split tensors.
 -        if self.pp_group.is_last_rank and dsa_use_prefill_cp(forward_batch):
 +        if self.pp_group.is_last_rank and use_prefill_cp and not cp_v2_active:
@@ -2808,16 +2808,16 @@ index cfac77f383fd..74b7ced6152a 100644
 @@ -1,7 +1,7 @@
 -"""B200 extra CI: DeepSeek-V4-Flash FP4 with attn-CP (DSA prefill CP).
 +"""B200 extra CI: DeepSeek-V4-Flash FP4 with attn-CP.
- 
+
  Balanced recipe (TP=4, DeepEP, EAGLE) plus --attn-cp-size=4 with the
 -DSA prefill-CP round-robin-split mode. Split out of
 +DSA prefill-CP interleave strategy. Split out of
  models_e2e/test_deepseek_v4_flash_fp4_b200.py so the `cp` group covers
  all context-parallel tests.
- 
+
 @@ -29,6 +29,7 @@
  DEEPEP_CONFIG = '{"normal_dispatch":{"num_sms":96},"normal_combine":{"num_sms":96}}'
- 
+
  _DEEPEP_ENV = {
 +    "SGLANG_ENABLE_CP_V2": "1",
      "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "1024",
@@ -2825,7 +2825,7 @@ index cfac77f383fd..74b7ced6152a 100644
      # captured at full dispatch capacity), which starves the eager prefill
 @@ -38,6 +39,7 @@
  }
- 
+
  _MEGAMOE_ENV = {
 +    "SGLANG_ENABLE_CP_V2": "1",
      "SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK": "8320",
@@ -2872,7 +2872,7 @@ index cfac77f383fd..74b7ced6152a 100644
              ],
 +            env={"SGLANG_ENABLE_CP_V2": "1"},
          )
- 
+
      @classmethod
 ```
 
@@ -2978,7 +2978,7 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
 @@ -62,6 +62,51 @@ def apply_deepseek_v4_defaults(server_args: ServerArgs, model_arch: str) -> None
                  server_args.speculative_eagle_topk == 1
              ), f"Only EAGLE speculative algorithm with topk == 1 is supported for {model_arch}"
- 
+
 +    validate_deepseek_v4_dcp(server_args)
 +
 +
@@ -3024,7 +3024,7 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
 +        f"attn_tp={attn_tp}"
 +    )
 +
- 
+
  def validate_deepseek_v4_cp(server_args: ServerArgs) -> None:
      """Validate DeepSeek V4 context-parallel configuration."""
 ```
@@ -3044,18 +3044,18 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
 @@ -42,9 +44,8 @@
      from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
      from sglang.srt.model_executor.forward_batch_info import ForwardBatch
- 
+
 -
  FP8_DTYPE = torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 -
 +FP8_MAX = torch.finfo(FP8_DTYPE).max
- 
+
  IndexerQuery: TypeAlias = Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
- 
+
 @@ -558,6 +559,217 @@ def _forward_nonpaged_indexer(
              max_seqlen_k=plan.max_seqlen_k,
          )
- 
+
 +    def _try_forward_dcp_sharded_c4_indexer(
 +        self,
 +        *,
@@ -3185,8 +3185,8 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
  from sglang.srt.runtime_context import get_parallel
 @@ -89,6 +99,17 @@
  PAGE_INDEX_ALIGNED_SIZE = 64
- 
- 
+
+
 +def _expand_dcp_local_kv_mask(mask: torch.Tensor, target_len: int) -> torch.Tensor:
 +    mask = mask.reshape(-1)
 +    if mask.numel() == target_len:
@@ -3208,7 +3208,7 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
 +    dcp_swa_has_local_kv: Optional[torch.Tensor] = None
 +    dcp_c128_has_local_kv: Optional[torch.Tensor] = None
 +    dcp_has_local_kv: Optional[torch.Tensor] = None
- 
+
      c1_flashmla_metadata: FlashMLASchedMeta = field(init=False, repr=False)
      c4_flashmla_metadata: FlashMLASchedMeta = field(init=False, repr=False)
 @@ -223,6 +247,9 @@ def copy_(self, other: DSV4AttnMetadata) -> None:
@@ -3234,11 +3234,11 @@ SGLANG_DSV4_DCP_A2A_LSE_VERIFY=...
 @@ -300,9 +330,75 @@ def init_compression_metadata(self):
              compute_page_indices=True,
          )
- 
+
 +        self.apply_dcp_local_kv_indices()
          self.c128_page_indices = _pad_last_dim(self.c128_page_indices)
          self.swa_page_indices = _pad_last_dim(self.swa_page_indices)
- 
+
 +    @staticmethod
 +    def _compact_dcp_local_indices(
 +        indices: torch.Tensor,
@@ -3391,7 +3391,7 @@ index 65dd55549924..7e033d8d9a1c 100644
 +
  _is_gfx95_supported = is_gfx95_supported()
  _is_gfx942_supported = is_gfx942_supported()
- 
+
 @@ -1854,7 +1877,9 @@ def _run_moe_ffn_dp_sync(
              )
              if _do_shared_local and local_hidden_states.shape[0] > 0:
@@ -3452,7 +3452,7 @@ index 65dd55549924..7e033d8d9a1c 100644
 -        state.gather_keepalive = local
 +        state.gather_keepalive = local_shard
          state.global_hidden = global_hidden
- 
+
      def op_gather_b(self, state):
 @@ -2108,7 +2138,7 @@ def op_combine_a(self, state):
          state.combine_event = dp_reduce_scatterv_async(
@@ -3471,7 +3471,7 @@ index 65dd55549924..7e033d8d9a1c 100644
 +        requires CP1, multi-rank DP, and SUM_LEN padding.
          """
          from sglang.srt.layers.moe import is_tbo_enabled
- 
+
 @@ -2252,6 +2284,15 @@ def _can_run_tbo(self, forward_batch: ForwardBatch) -> bool:
              # should enter the prefill TBO strategy.
              and forward_batch.global_forward_mode.is_extend_without_speculative()
@@ -3487,7 +3487,7 @@ index 65dd55549924..7e033d8d9a1c 100644
 +            )
              and self.pp_group.world_size == 1
          )
- 
+
 @@ -2294,6 +2335,7 @@ def _forward_layers_tbo(
 
 # ... truncated 66 lines ...
@@ -3548,7 +3548,7 @@ index 52fb8c098d8b..4d6080869bb4 100644
 +                not get_moe_a2a_backend().is_none() or get_parallel().attn_tp_size == 1
 +            )
          )
- 
+
      def _forward_layers_tbo(
 diff --git a/test/registered/unit/models/test_deepseek_v4_tbo_policy.py b/test/registered/unit/models/test_deepseek_v4_tbo_policy.py
 new file mode 100644
@@ -3756,14 +3756,14 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 
 ```diff
 @@ -30,14 +30,13 @@
- 
- 
+
+
  class SchedulerMultiplexMixin:
 -
      def init_pdmux(self: Scheduler):
          # The current split prefill batch
          self.split_prefill_batch: Optional[ScheduleBatch] = None
- 
+
          # for pd_multiplexing, Init stream_groups, exclude normal stream for prefill only and decode only
          self.pdmux_config = load_pdmux_config(self.server_args.pdmux_config_path)
 -        initialize_stream_groups(self.gpu_id, self.pdmux_config)
@@ -3774,7 +3774,7 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 @@ -94,6 +93,79 @@ def update_split_prefill_batch(self: Scheduler, sm_count: int) -> bool:
              return True
          return False
- 
+
 +    def _get_split_forward_count(self: Scheduler) -> int:
 +        remaining_layers = (
 +            self.model_config.num_hidden_layers - self.split_prefill_batch.split_index
@@ -3884,7 +3884,7 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
          self.min_free_slots_delayer: Optional[MinFreeSlotsDelayer] = None
 @@ -2907,19 +2920,28 @@ def _get_new_batch_prefill_raw(
                  chunked_prefill_size = dynamic_size
- 
+
          # Prefill policy
 +        # DeepSeek V4 compressor plans encode ragged token ids as uint16. PDMux
 +        # cannot use chunked prefill, so admission must keep the complete batch
@@ -3936,7 +3936,7 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 @@ -859,11 +861,18 @@ def _lock_node(self, last_node: TreeNode):
              else:
                  self.tree_cache.dec_lock_ref(last_node)
- 
+
 +    def _prefill_token_budget_exceeded(self, input_tokens: int) -> bool:
 +        if self.enforce_max_prefill_tokens:
 +            return input_tokens > self.rem_input_tokens
@@ -3955,7 +3955,7 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 @@ -1028,10 +1037,8 @@ def add_one_req(
              if swa_needed >= self.rem_swa_tokens:
                  return AddReqResult.NO_TOKEN
- 
+
 -        if (
 -            self.rem_chunk_tokens is None
 -            and len(self.can_run_list) != 0
@@ -3968,7 +3968,7 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 @@ -1066,10 +1073,8 @@ def add_one_req(
                  len(req.full_untruncated_fill_ids) - len(req.prefix_indices)
              )
- 
+
 -            if (
 -                self.rem_chunk_tokens is None
 -                and len(self.can_run_list) != 0
@@ -3984,9 +3984,9 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 
 ```diff
 @@ -2306,6 +2306,109 @@ def forward(
- 
+
          return hidden_states, pre_hc_head
- 
+
 +    def forward_split_prefill(
 +        self,
 +        input_ids: torch.Tensor,
@@ -4090,12 +4090,12 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 +        forward_batch.hidden_states = hidden_states
 +        return hidden_states, pre_hc_head
 +
- 
+
  class DeepseekV4ForCausalLM(nn.Module):
      def __init__(
 @@ -2421,14 +2524,7 @@ def determine_num_fused_shared_experts(self):
          self.num_fused_shared_experts = self.config.n_shared_experts
- 
+
      @torch.no_grad()
 -    def forward(
 -        self,
@@ -4112,8 +4112,8 @@ PDMux 既有开关（`--enable-pdmux` / multiplex 相关，以目标树为准）
 ```diff
 @@ -1701,6 +1701,14 @@ def set_pdmux_status(enable_prefill_multiplexing: bool):
      _ENABLE_PDMUX_P_TP = enable_prefill_multiplexing
- 
- 
+
+
 +def is_pdmux_prefill_enabled() -> bool:
 +    return _ENABLE_PDMUX_P_TP
 +

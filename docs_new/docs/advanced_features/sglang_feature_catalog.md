@@ -1,7 +1,7 @@
 # SGLang 特性与开关速查手册
 
-> 面向 DeepSeek-V4 / V4-Pro 及相关 MoE Serving 场景整理。  
-> 覆盖：特性解释、应用场景、主开关、限制条件、互斥矩阵。  
+> 面向 DeepSeek-V4 / V4-Pro 及相关 MoE Serving 场景整理。
+> 覆盖：特性解释、应用场景、主开关、限制条件、互斥矩阵。
 > 信息以当前 `sgl-project/sglang` 代码与 cookbook 为准，个别实验开关可能随版本变化。
 
 ---
@@ -535,22 +535,22 @@ export SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK=8320
 
 ## 常见误区
 
-1. **HiCache ≠ HiSparse**  
+1. **HiCache ≠ HiSparse**
    HiCache=跨请求分层前缀；HiSparse=单请求 decode 热 KV。
 
-2. **ShadowRadix ≠ HiCache**  
+2. **ShadowRadix ≠ HiCache**
    ShadowRadix/UnifiedRadix 是索引语义；HiCache 是存储分层。
 
-3. **SBO ≠ TBO/DBO**  
+3. **SBO ≠ TBO/DBO**
    SBO=单 batch 内重叠；TBO=两 ubatch 互重叠。
 
-4. **MegaMoE ≠ 开了就能叠完整 SBO/TBO**  
+4. **MegaMoE ≠ 开了就能叠完整 SBO/TBO**
    MegaMoE 是 fused MoE 路径，很多经典插桩点没了。
 
-5. **Waterfill ≠ EPLB**  
+5. **Waterfill ≠ EPLB**
    Waterfill 处理 shared expert 填平；EPLB 做专家放置重平衡。
 
-6. **DSA flags ≠ DSV4 flags**  
+6. **DSA flags ≠ DSV4 flags**
    V3.2 DSA backend 开关不能直接当成 V4 开关。
 
 ---

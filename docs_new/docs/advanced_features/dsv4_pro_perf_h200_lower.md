@@ -1,12 +1,12 @@
 # DeepSeek-V4-Pro 性能数据（H200 及更低规格硬件）
 
-> 来源优先级：  
-> 1) cookbook `deepseek-v4-benchmarks.jsx`（Verified）  
-> 2) 相关 docs PR（如 `#31363`, `#33109`）  
-> 3) feature PR / issue（仅作补充，口径可能不一致）  
+> 来源优先级：
+> 1) cookbook `deepseek-v4-benchmarks.jsx`（Verified）
+> 2) 相关 docs PR（如 `#31363`, `#33109`）
+> 3) feature PR / issue（仅作补充，口径可能不一致）
 >
-> 默认 workload：`random`, **ISL=8192**, **OSL=1024**  
-> 指标：`tokens_per_sec_per_gpu` = 总吞吐/GPU（input+output 折算）  
+> 默认 workload：`random`, **ISL=8192**, **OSL=1024**
+> 指标：`tokens_per_sec_per_gpu` = 总吞吐/GPU（input+output 折算）
 > 延迟：cookbook 现口径多为 **P50**（`#31363` 后）
 
 ---
@@ -42,14 +42,14 @@
 
 ### 官方注释（很关键）
 
-> 8×H200 跑 1.6T Pro 时 **capacity-bound**：KV 大概只能撑约 **~15 concurrent requests**。  
+> 8×H200 跑 1.6T Pro 时 **capacity-bound**：KV 大概只能撑约 **~15 concurrent requests**。
 > 所以从 conc 64 一直到 ht/4096，`tok/s/GPU` 基本钉在 **~535–601**；更高并发只是排队，TTFT 到几十秒甚至分钟级。
 
 ### 解读
 
-1. **单机 H200 不适合拿 Pro 冲高并发吞吐**  
-2. low-latency 的 TPOT 还行（约 5.7–23 ms），但绝对吞吐远低于 B200/B300 Pro  
-3. balanced/ht 的“高吞吐数字”几乎不涨，别被 concurrency 参数误导  
+1. **单机 H200 不适合拿 Pro 冲高并发吞吐**
+2. low-latency 的 TPOT 还行（约 5.7–23 ms），但绝对吞吐远低于 B200/B300 Pro
+3. balanced/ht 的“高吞吐数字”几乎不涨，别被 concurrency 参数误导
 4. 若要更高并发，官方单元格倾向 **H200 Pro FP8 → multi-2**（但目前还没填测速）
 
 对应 model path（H200 FP8 场景）：
@@ -176,12 +176,12 @@ h100 / pro / fp4 / {low-latency,balanced,high-throughput} / nodes=multi-2
 ## 7. 实操建议（如果你主要只有 H200/更低卡）
 
 ### 想跑 Pro
-1. **优先 8×H200 + FP4 low-latency / 浅并发**（官方有数）  
-2. 需要更高并发：走 **多机（cookbook 的 multi-2 FP8/FP4 占位）**，但目前缺公开测速，需要自测  
+1. **优先 8×H200 + FP4 low-latency / 浅并发**（官方有数）
+2. 需要更高并发：走 **多机（cookbook 的 multi-2 FP8/FP4 占位）**，但目前缺公开测速，需要自测
 3. 别指望单机 H200 上 ht/4096 还能线性涨吞吐——已经撞容量墙
 
 ### 想要可用吞吐/延迟
-- 同平台优先看 **Flash** verified（H200/H100 数据完整）  
+- 同平台优先看 **Flash** verified（H200/H100 数据完整）
 - 或自建 Pro 多机基线
 
 ### 复现命令骨架
@@ -204,10 +204,10 @@ python3 -m sglang.bench_serving \
 
 ## 8. 数据缺口清单（方便你继续追 PR/自测）
 
-- [ ] H200 Pro FP8 multi-2 三策略测速  
-- [ ] H100 Pro FP4 multi-2 三策略测速  
-- [ ] H20 Pro（若社区有人跑）  
-- [ ] MI355X Pro（recipe 有、benchmark 空）  
+- [ ] H200 Pro FP8 multi-2 三策略测速
+- [ ] H100 Pro FP4 multi-2 三策略测速
+- [ ] H20 Pro（若社区有人跑）
+- [ ] MI355X Pro（recipe 有、benchmark 空）
 - [ ] 统一口径：output tok/s vs total tok/s/GPU、P50 vs Mean
 
 ---
