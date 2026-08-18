@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool, MLATokenToKVPool
 from sglang.srt.utils import is_cuda, is_hip
 
 logger = logging.getLogger(__name__)
@@ -115,8 +115,58 @@ class HiSparseDSATokenToKVPool(DSATokenToKVPool):
             num_layers=self.layer_num,
         )
 
+    def _as_index_tensor(self, indices) -> torch.Tensor:
+        if not torch.is_tensor(indices):
+            indices = torch.as_tensor(indices, dtype=torch.int64, device=self.device)
+        return indices.to(device=self.device, dtype=torch.int64).reshape(-1)
+
+    def _copy_index_k_cpu(self, indices: torch.Tensor):
+        page_indices = indices[:: self.page_size] // self.page_size
+        torch.cuda.synchronize()
+        index_k_cpu = []
+        chunk_size = self.cpu_offloading_chunk_size
+        page_chunk_size = max(1, chunk_size // self.page_size)
+        for layer_id in range(self.layer_num):
+            index_k_cpu.append([])
+            for i in range(0, len(page_indices), page_chunk_size):
+                chunk_page_indices = page_indices[i : i + page_chunk_size]
+                idx_cpu = self.index_k_with_scale_buffer[layer_id][
+                    chunk_page_indices
+                ].to("cpu", non_blocking=True)
+                index_k_cpu[-1].append(idx_cpu)
+        torch.cuda.synchronize()
+        return index_k_cpu
+
+    def _load_index_k_cpu(self, index_k_cpu, indices: torch.Tensor) -> None:
+        page_indices = indices[:: self.page_size] // self.page_size
+        torch.cuda.synchronize()
+        chunk_size = self.cpu_offloading_chunk_size
+        page_chunk_size = max(1, chunk_size // self.page_size)
+        for layer_id in range(self.layer_num):
+            for i in range(0, len(page_indices), page_chunk_size):
+                chunk_page_indices = page_indices[i : i + page_chunk_size]
+                idx_cpu = index_k_cpu[layer_id][i // page_chunk_size]
+                assert idx_cpu.shape[0] == len(chunk_page_indices)
+                idx_chunk = idx_cpu.to(
+                    self.index_k_with_scale_buffer[0].device, non_blocking=True
+                )
+                self.index_k_with_scale_buffer[layer_id][chunk_page_indices] = idx_chunk
+        torch.cuda.synchronize()
+
     def get_cpu_copy(self, indices, mamba_indices=None):
-        raise NotImplementedError("HiSparseDevicePool does not support get_cpu_copy")
+        # kv_buffer is addressed in hisparse device space; index_k stays in
+        # logical page space (index_buf_size = device_size * host_to_device_ratio).
+        indices = self._as_index_tensor(indices)
+        device_indices = self.translate_loc_from_full_to_hisparse_device(indices)
+        kv_cache_cpu = MLATokenToKVPool.get_cpu_copy(
+            self, device_indices, mamba_indices=mamba_indices
+        )
+        return {"kv": kv_cache_cpu, "index_k": self._copy_index_k_cpu(indices)}
 
     def load_cpu_copy(self, kv_cache_cpu, indices, mamba_indices=None):
-        raise NotImplementedError("HiSparseDevicePool does not support load_cpu_copy")
+        indices = self._as_index_tensor(indices)
+        device_indices = self.translate_loc_from_full_to_hisparse_device(indices)
+        MLATokenToKVPool.load_cpu_copy(
+            self, kv_cache_cpu["kv"], device_indices, mamba_indices=mamba_indices
+        )
+        self._load_index_k_cpu(kv_cache_cpu["index_k"], indices)

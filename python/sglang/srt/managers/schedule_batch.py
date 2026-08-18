@@ -1741,14 +1741,15 @@ def release_req(
     hisparse_coordinator: Optional[HiSparseCoordinator],
     offload_kv: bool = True,
 ) -> None:
+    # Decode-disagg retract saves KV so the request can resume without recompute.
+    # HiSparse must snapshot first: retract_req frees host/device slots and
+    # clears the logical->device mapping that get_cpu_copy needs.
+    should_offload_kv = server_args.disaggregation_mode == "decode" and offload_kv
     if hisparse_coordinator is not None and not req.finished():
+        if should_offload_kv:
+            req.kv_cache_cpu = hisparse_coordinator.snapshot_kv_cache(req)
         hisparse_coordinator.retract_req(req)
-
-    # In decode disaggregation the retracted KV is offloaded to host so it can be
-    # restored later without recompute (see resume_retracted_reqs/load_kv_cache).
-    # Callers that will recompute the KV instead (PD true-retraction rebootstrap)
-    # pass offload_kv=False to skip the wasteful device->host copy.
-    if server_args.disaggregation_mode == "decode" and offload_kv:
+    elif should_offload_kv:
         req.offload_kv_cache(req_to_token_pool, token_to_kv_pool_allocator)
     # TODO (csy): for preempted requests, we may want to insert into the tree
     release_kv_cache(req, tree_cache, is_insert=False)
