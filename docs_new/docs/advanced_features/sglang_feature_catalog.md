@@ -13,13 +13,13 @@
 | 目标 | 先看章节 |
 |---|---|
 | 单机/多机怎么切卡 | [A. 并行](#a-并行-parallelism) |
-| MoE 吞吐/通信 | [B. MoE / EP / Overlap](#b-moe--ep--overlap) |
-| DSV4 混合注意力 | [C. Attention / DSV4 Hybrid](#c-attention--dsv4-hybrid) |
+| MoE 吞吐/通信 | [B. MoE / EP / Overlap](#b-moe-/-ep-/-overlap) |
+| DSV4 混合注意力 | [C. Attention / DSV4 Hybrid](#c-attention-/-dsv4-hybrid) |
 | 前缀复用 / 长上下文 | [D. Cache](#d-cache) |
 | 降延迟 | [E. Speculative Decoding](#e-speculative-decoding) |
-| 显存/精度 | [F. 量化 / Kernel](#f-量化--kernel) |
+| 显存/精度 | [F. 量化 / Kernel](#f-量化-/-kernel) |
 | Prefill/Decode 分离 | [G. PD Disaggregation](#g-pd-disaggregation) |
-| Graph / 调度 | [H. CUDA Graph / Scheduler](#h-cuda-graph--scheduler) |
+| Graph / 调度 | [H. CUDA Graph / Scheduler](#h-cuda-graph-/-scheduler) |
 | 哪些不能一起开 | [互斥矩阵](#开关互斥矩阵) |
 | DSV4 Pro 推荐组合 | [推荐配方](#dsv4-pro-推荐配方) |
 
@@ -134,7 +134,7 @@
 | 项 | 内容 |
 |---|---|
 | **开关** | `--moe-a2a-backend megamoe` 或 `SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE=1` |
-| **相关 env** | `SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK`<br>`SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS`<br>`SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND`<br>`SGLANG_OPT_FIX_MEGA_MOE_MEMORY` |
+| **相关 env** | `SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK`<br/>`SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_FP4_ACTS`<br/>`SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND`<br/>`SGLANG_OPT_FIX_MEGA_MOE_MEMORY` |
 | **解释** | 把 dispatch + L1 + SwiGLU + L2 + combine 融成 DeepGEMM mega-kernel |
 | **场景** | **Blackwell 高吞吐**（B200/B300/GB200/GB300） |
 | **限制** | 仅 Blackwell；cookbook 主要挂 high-throughput；RTX PRO 6000 不支持；开 MegaMoE 时不要手设 `--moe-runner-backend`；完整 DeepEP-SBO 不可用，只剩 shared 轻量重叠 |
@@ -254,7 +254,7 @@
 | 项 | 内容 |
 |---|---|
 | **开关** | `--enable-hierarchical-cache` |
-| **关键参数** | `--hicache-ratio`（DSV4 常用）<br>`--hicache-size`<br>`--hicache-write-policy write_through|write_back|write_through_selective`<br>`--hicache-io-backend`<br>`--hicache-mem-layout`<br>`--hicache-storage-backend file|mooncake|hf3fs|nixl|...` |
+| **关键参数** | `--hicache-ratio`（DSV4 常用）<br/>`--hicache-size`<br/>`--hicache-write-policy write_through|write_back|write_through_selective`<br/>`--hicache-io-backend`<br/>`--hicache-mem-layout`<br/>`--hicache-storage-backend file|mooncake|hf3fs|nixl|...` |
 | **解释** | GPU → CPU → Storage 分层前缀缓存 |
 | **场景** | 多轮/agent/共享前缀很多，GPU 装不下 |
 | **限制** | 建立在 radix/UnifiedRadix 上；DSV4 常要求 `--hicache-ratio`；RTX PRO 6000 cookbook 不支持；与 HiSparse 当前互斥；L3 storage 推荐 `page_first_direct + direct + wait_complete` |
@@ -295,7 +295,7 @@
 
 | 项 | 内容 |
 |---|---|
-| **开关** | `--speculative-algorithm EAGLE|EAGLE3|NEXTN`<br>`--speculative-num-steps`<br>`--speculative-eagle-topk`<br>`--speculative-num-draft-tokens`<br>`--speculative-draft-model-path`（如需） |
+| **开关** | `--speculative-algorithm EAGLE|EAGLE3|NEXTN`<br/>`--speculative-num-steps`<br/>`--speculative-eagle-topk`<br/>`--speculative-num-draft-tokens`<br/>`--speculative-draft-model-path`（如需） |
 | **解释** | 草稿多 token，目标模型校验 |
 | **场景** | 低延迟 / 平衡配方 |
 | **限制** | 高吞吐饱和时常关；吃显存；接受率低会负优化；与部分 PP / DFlash / NGRAM 约束冲突 |
